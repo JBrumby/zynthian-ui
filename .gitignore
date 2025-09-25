@@ -5,3 +5,5 @@ zynlibs/*/build
 .vscode/launch.json
 .idea
 .old
+.BRUMBY
+.gitignore
