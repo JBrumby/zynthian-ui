@@ -17,6 +17,13 @@
 # This requires further investigation
 
 import logging
+
+# for changing events with mididings
+import mididings
+from functools import partial # needed for function params in mididings process
+# we need the scales
+from zyngine.ctrldev.zynthian_ctrldev_base_scale import _MODES
+
 from zyngine.ctrldev.zynthian_ctrldev_base import zynthian_ctrldev_base
 from zynlibs.zynseq import zynseq  # For sending MIDI directly from this driver
 
@@ -36,6 +43,21 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
     # driver_name = "Keystation Pro 88 Minimal"  # Optional, for log information
     # driver_description = "Minimalistic Zynthian Control Device Driver for M-Audio Keystation Pro 88" 
     # driver_version = "0.1" 
+    # True if input device must be unrouted from chains when driver is loaded
+    # Alternately specific MIDI channels can be unrouted by specifying a bitwise mask,
+    # For instance, use "0b0000000000001111" to unroute MIDI channels 0 to 3.
+    # unroute_from_chains = True 
+    # keystation sends on channel 1 to 4 its note events. 4 different split keyboard setup on hardware device
+    # I want to use channel16 for this driver to get its information by mididings, so I unroute this only channel
+    # unroute_from_chains = 0b0000_0000_0000_0001
+    unroute_from_chains = False
+    # now nothing than events on channel 16 reach this driver! 
+    # without routing in mididings it wount work anymore
+    
+    # copied from an instance of Harmony()
+    # target_mode = [0, 2, 4, 5, 7, 9, 11] #  mode major
+    # [48, 50, 52, 53, 47, 48, 50, 52, 53, 55, 57, 59, 52, 53, 55, 57, 59, 60, 62, 64, 57, 59, 60, 62, 64, 65, 67, 69, 62, 64, 65, 67, 69, 71, 72, 74, 67, 69, 71, 72, 74, 76, 77, 79, 72, 74, 76, 77, 79, 81, 83, 84, 77, 79, 81, ...]
+    
     
     # Helper variables for potentiometers. Workaround because ZYNPOT_ABS didn't work
     zynpot_0 = 0
@@ -55,9 +77,77 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
     
     
     def __init__(self, state_manager, idev_in, idev_out=None):
-        self.zynseq = state_manager.zynseq # we need to send midi events to zynthina
+        self.zynseq = state_manager.zynseq # we need to send midi events to zynthian
         super().__init__(state_manager, idev_in, idev_out)
         return
+    
+    ###########################################################################################################
+################ mididings
+
+# The midiproc task itself. It runs in a spawned process.
+    def midiproc_task(self):
+        self.midiproc_task_reset_signal_handlers()
+        
+        # Variable ist drin!
+        # scale_targets = self.target_mode
+        MODES = _MODES
+        # scale_targets = MODES["Minor"]
+        scale_targets = MODES["Hungarian Minor"]
+        
+        mididings.config(
+            backend='jack-rt',
+            client_name=self.midiproc_jackname,
+            in_ports=1,
+            out_ports=1,
+        )
+        
+        
+        # get parameters
+        def translate_scale(ev, distance):
+            print(distance)
+            note = ev.note
+            print(note)
+            
+            octave = note // 12
+            print(f"octave: {octave}")
+            
+            chroma_note = note % 12
+            print(f"chroma_note: {chroma_note}")
+            
+            # Mapping: get white keys, remove black keys from piano notes
+            key_map = (0, None, 1, None, 2, 3, None, 4, None, 5, None, 6)
+    
+            if chroma_note < 0 or chroma_note >= len(key_map): # is map right initialized
+                return None  # for shorter modes with less then 7 tones
+            
+            chroma_note_cleaned = key_map[chroma_note]
+            if chroma_note_cleaned == None: # is black key.
+                return None # discard event
+            
+            print(f"chroma_note_cleaned: {chroma_note_cleaned}")
+            if not 0 <= chroma_note_cleaned < len(scale_targets): # wrong scale_map values
+                return None
+            
+            note_new = scale_targets[chroma_note_cleaned] + (octave * 12)
+            print(f"Heureka target note is {note_new}")
+            ev.note = note_new
+            return ev
+        
+        
+        mididings.run(
+            # #mididings.Pass() // (mididings.Channel(2) >> (mididings.Pass() // mididings.Transpose(4) // mididings.Transpose(7)))
+            # mididings.Pass() // 
+            # # mididings.Transpose(4) // 
+            # # mididings.Transpose(7) 
+            # # translate_scale()
+            
+            # minimal func without params
+            # mididings.Process(translate_scale1)
+
+            # with params
+            mididings.Process( partial( translate_scale, distance = 3) )                        
+        )
+
     
     def midi_event(self, ev):
         """MIDI event handler for Keystation Pro 88"""
@@ -140,6 +230,7 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
     
     def send_midi(self, ev):
         """Send MIDI event to active chain"""
+        return False
         chain = self.chain_manager.get_active_chain()
         
         if chain is None or chain.midi_chan is None:
