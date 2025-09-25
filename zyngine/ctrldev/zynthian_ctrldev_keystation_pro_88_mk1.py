@@ -82,17 +82,16 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
         return
     
     ###########################################################################################################
-################ mididings
+################ start of mididings   ######################################################
 
 # The midiproc task itself. It runs in a spawned process.
     def midiproc_task(self):
         self.midiproc_task_reset_signal_handlers()
-        
               
         MODES = _MODES
         # scale_targets = MODES["Minor"]
         # scale_targets = MODES["Hungarian Minor"]
-        scale_targets = [0, 2, 3, 6, 7, 8, 11]
+        scale_targets = [0, 2, 3, 6, 7, 8, 11] # is Hungarian Minor
         
         mididings.config(
             backend='jack-rt',
@@ -104,33 +103,26 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
         
         # get parameters
         def translate_scale(ev, distance = None):
-            # print(distance)
             note = ev.note
-            # print(note)
-            
             octave = note // 12
-            # print(f"octave: {octave}")
-            
             chroma_note = note % 12
-            # print(f"chroma_note: {chroma_note}")
             
-            # Mapping: get white keys, remove black keys from piano notes
+            # Mapping: get white keys, set black to None
             key_map = (0, None, 1, None, 2, 3, None, 4, None, 5, None, 6)
     
             if chroma_note < 0 or chroma_note >= len(key_map): # is map right initialized
-                return None  # for shorter modes with less then 7 tones
+                return None  # len(keymap) must be 12 
             
             chroma_note_cleaned = key_map[chroma_note]
             if chroma_note_cleaned == None: # is black key.
                 return None # discard event
-            
-            # print(f"chroma_note_cleaned: {chroma_note_cleaned}")
-            if not 0 <= chroma_note_cleaned < len(scale_targets): # wrong scale_map values
+   
+            if not 0 <= chroma_note_cleaned < len(scale_targets): # scale is shorter than 12 semitones. block last white keys from keyoard 
                 return None
             
-            note_new = scale_targets[chroma_note_cleaned] + (octave * 12)
-            # print(f"Heureka target note is {note_new}")
-            ev.note = note_new
+            note_new = scale_targets[chroma_note_cleaned] + (octave * 12) # get new chroma and translate back to octave
+
+            ev.note = note_new # Herueka, a new Mode note event
             return ev
         
         mididings.run(
@@ -138,21 +130,16 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
                 # #mididings.Pass() // (mididings.Channel(2) >> (mididings.Pass() // mididings.Transpose(4) // mididings.Transpose(7)))
                 # mididings.Pass() //  mididings.Transpose(4) //  mididings.Transpose(7)
             
-
-                # with params
-                ## mididings.Filter(mididings.PROGRAM) // # all but note events
-                #mididings.Channel(5) // # all to channel 5 which will not be routed
-                
                 mididings.Filter(mididings.CTRL) >> mididings.Channel(5),  # jst CTRLS to keyboard driver   
                 
                 mididings.Filter(mididings.NOTEON | mididings.NOTEOFF ) >> 
-                    mididings.Process( partial( translate_scale, distance = None) ) ,
+                    mididings.Process( partial( translate_scale, distance = None) ),
                     
-                ~mididings.Filter(mididings.NOTEON | mididings.NOTEOFF) >> mididings.Pass()
+                ~mididings.Filter(mididings.NOTEON | mididings.NOTEOFF) >> mididings.Pass() # pitch  bend and other controls
                     
             ]                  
         )
-
+###################   END of mididings   ####################################
     
     def midi_event(self, ev):
         # return False
