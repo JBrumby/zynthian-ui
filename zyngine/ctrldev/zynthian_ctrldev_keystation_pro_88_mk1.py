@@ -49,8 +49,8 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
     # unroute_from_chains = True 
     # keystation sends on channel 1 to 4 its note events. 4 different split keyboard setup on hardware device
     # I want to use channel16 for this driver to get its information by mididings, so I unroute this only channel
-    # unroute_from_chains = 0b0000_0000_0000_0001
-    unroute_from_chains = False
+    unroute_from_chains = 0b0000_0000_0001_0000
+    # unroute_from_chains = False # all is working as intended
     # now nothing than events on channel 16 reach this driver! 
     # without routing in mididings it wount work anymore
     
@@ -88,11 +88,11 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
     def midiproc_task(self):
         self.midiproc_task_reset_signal_handlers()
         
-        # Variable ist drin!
-        # scale_targets = self.target_mode
+              
         MODES = _MODES
         # scale_targets = MODES["Minor"]
-        scale_targets = MODES["Hungarian Minor"]
+        # scale_targets = MODES["Hungarian Minor"]
+        scale_targets = [0, 2, 3, 6, 7, 8, 11]
         
         mididings.config(
             backend='jack-rt',
@@ -103,16 +103,16 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
         
         
         # get parameters
-        def translate_scale(ev, distance):
-            print(distance)
+        def translate_scale(ev, distance = None):
+            # print(distance)
             note = ev.note
-            print(note)
+            # print(note)
             
             octave = note // 12
-            print(f"octave: {octave}")
+            # print(f"octave: {octave}")
             
             chroma_note = note % 12
-            print(f"chroma_note: {chroma_note}")
+            # print(f"chroma_note: {chroma_note}")
             
             # Mapping: get white keys, remove black keys from piano notes
             key_map = (0, None, 1, None, 2, 3, None, 4, None, 5, None, 6)
@@ -124,33 +124,43 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
             if chroma_note_cleaned == None: # is black key.
                 return None # discard event
             
-            print(f"chroma_note_cleaned: {chroma_note_cleaned}")
+            # print(f"chroma_note_cleaned: {chroma_note_cleaned}")
             if not 0 <= chroma_note_cleaned < len(scale_targets): # wrong scale_map values
                 return None
             
             note_new = scale_targets[chroma_note_cleaned] + (octave * 12)
-            print(f"Heureka target note is {note_new}")
+            # print(f"Heureka target note is {note_new}")
             ev.note = note_new
             return ev
         
-        
         mididings.run(
-            # #mididings.Pass() // (mididings.Channel(2) >> (mididings.Pass() // mididings.Transpose(4) // mididings.Transpose(7)))
-            # mididings.Pass() // 
-            # # mididings.Transpose(4) // 
-            # # mididings.Transpose(7) 
-            # # translate_scale()
+            [
+                # #mididings.Pass() // (mididings.Channel(2) >> (mididings.Pass() // mididings.Transpose(4) // mididings.Transpose(7)))
+                # mididings.Pass() //  mididings.Transpose(4) //  mididings.Transpose(7)
             
-            # minimal func without params
-            # mididings.Process(translate_scale1)
 
-            # with params
-            mididings.Process( partial( translate_scale, distance = 3) )                        
+                # with params
+                ## mididings.Filter(mididings.PROGRAM) // # all but note events
+                #mididings.Channel(5) // # all to channel 5 which will not be routed
+                
+                mididings.Filter(mididings.CTRL) >> mididings.Channel(5),  # jst CTRLS to keyboard driver   
+                
+                mididings.Filter(mididings.NOTEON | mididings.NOTEOFF ) >> 
+                    mididings.Process( partial( translate_scale, distance = None) ) ,
+                    
+                ~mididings.Filter(mididings.NOTEON | mididings.NOTEOFF) >> mididings.Pass()
+                    
+            ]                  
         )
 
     
     def midi_event(self, ev):
+        # return False
         """MIDI event handler for Keystation Pro 88"""
+        filter_chan_5 = 5-1
+        if not ev[0] & 0x0F == filter_chan_5:
+            return False
+        
         evtype = (ev[0] >> 4) & 0x0F
         
         if len(ev) == 3:
@@ -160,9 +170,10 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
             status = ev[0] & 0xF0  # MIDI message type (note on, note off, control change, etc.)
             # channel = ev[0] & 0x0F  # Not used
         
-        # Forward certain events directly to MIDI output
-        if evtype in [self.EV_NOTE_ON, self.EV_NOTE_OFF, self.EV_AFTERTOUCH, self.EV_PITCHBEND]:
-            return self.send_midi(ev)
+        # not more necessary. Mididings is working
+        # # Forward certain events directly to MIDI output
+        # if evtype in [self.EV_NOTE_ON, self.EV_NOTE_OFF, self.EV_AFTERTOUCH, self.EV_PITCHBEND]:
+        #     return self.send_midi(ev)
         
         # Process 3-byte events (control changes)
         if len(ev) == 3:
@@ -226,7 +237,7 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
         #             self.state_manager.send_cuia("SELECT")
         #             return True
         
-        return False  # Event not processed by this driver
+        return False # nothing to do. mididings did its thing  # Event not processed by this driver
     
     def send_midi(self, ev):
         """Send MIDI event to active chain"""
