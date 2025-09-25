@@ -75,6 +75,7 @@ from zyngine.ctrldev.zynthian_ctrldev_base_extended import RunTimer, KnobSpeedCo
 # import zyngine.ctrldev.ableton.push1_consts as ABL  # external Button definitions
 # ABL is now defined as class at end of ile.
 
+import mididings
 
 # Zynthian core modules
 from zyngine.ctrldev.zynthian_ctrldev_base import zynthian_ctrldev_zynpad, zynthian_ctrldev_zynmixer
@@ -228,6 +229,25 @@ class zynthian_ctrldev_ableton_push_1_v2(zynthian_ctrldev_zynpad, zynthian_ctrld
         """Clean up device state - called from parent class"""
         logging.info("Shutting down Ableton Push 1 - BRUMBY")
         super().end()
+
+###########################################################################################################
+################ mididings
+
+# The midiproc task itself. It runs in a spawned process.
+    def midiproc_task(self):
+        self.midiproc_task_reset_signal_handlers()
+        mididings.config(
+            backend='jack-rt',
+            client_name=self.midiproc_jackname,
+            in_ports=1,
+            out_ports=1
+        )
+        mididings.run(
+            # mididings.Pass() // (mididings.Channel(2) >> (mididings.Pass() // mididings.Transpose(4) // mididings.Transpose(7)))
+            # mididings.Pass() // mididings.Transpose(4) // mididings.Transpose(7)
+            mididings.Pass()
+        )
+
 
 #################################################################################################################
 ##################     START of SCALES FUNCTIONS     ##########################################################
