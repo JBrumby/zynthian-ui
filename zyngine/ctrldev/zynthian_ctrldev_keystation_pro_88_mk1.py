@@ -87,7 +87,7 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
 ################ start of mididings   ######################################################
 
 # The midiproc task itself. It runs in a spawned process.
-    def midiproc_task(self):
+    def midiproc_task(self, jackname):
         self.midiproc_task_reset_signal_handlers()
               
         # MODES = _MODES
@@ -98,7 +98,7 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
         mididings.config(
             # backend='jack-rt',
             backend='jack',
-            client_name=self.midiproc_jackname,
+            client_name=jackname,
             in_ports=1,
             out_ports=1,
         )
