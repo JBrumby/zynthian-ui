@@ -30,6 +30,9 @@ from zynlibs.zynseq import zynseq  # For sending MIDI directly from this driver
 logger = logging.getLogger('zynthian')
 
 class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
+    
+    autoload_flag = True
+    
     # Device identification
     # dev_id = ["Keystation Pro 88"]  # Optional
     
@@ -40,25 +43,24 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
     
     dev_ids = ["Keystation Pro 88 IN 1"]  # These values are essential
 
-    # driver_name = "Keystation Pro 88 Minimal"  # Optional, for log information
-    # driver_description = "Minimalistic Zynthian Control Device Driver for M-Audio Keystation Pro 88" 
+    driver_name = "Keystation Pro 88 Minimal"  # Optional, for log information
+    driver_description = "Minimalistic Zynthian Control Device Driver for M-Audio Keystation Pro 88 Mk1" 
+    
     # driver_version = "0.1" 
     # True if input device must be unrouted from chains when driver is loaded
     # Alternately specific MIDI channels can be unrouted by specifying a bitwise mask,
     # For instance, use "0b0000000000001111" to unroute MIDI channels 0 to 3.
     # unroute_from_chains = True 
+    
     # keystation sends on channel 1 to 4 its note events. 4 different split keyboard setup on hardware device
-    # I want to use channel16 for this driver to get its information by mididings, so I unroute this only channel
+    # on CHanel 1 are the Ctrl / PC / PB /Sysex etc.
+    
+    # I want to use channel 5 for this driver to get its information by mididings, so I unroute this only channel
+    # so every chanel except 5 is routed to chains. This driver gets ALL events on each chanel!
     unroute_from_chains = 0b0000_0000_0001_0000
     # unroute_from_chains = False # all is working as intended
-    # now nothing than events on channel 16 reach this driver! 
-    # without routing in mididings it wount work anymore
-    
-    # copied from an instance of Harmony()
-    # target_mode = [0, 2, 4, 5, 7, 9, 11] #  mode major
-    # [48, 50, 52, 53, 47, 48, 50, 52, 53, 55, 57, 59, 52, 53, 55, 57, 59, 60, 62, 64, 57, 59, 60, 62, 64, 65, 67, 69, 62, 64, 65, 67, 69, 71, 72, 74, 67, 69, 71, 72, 74, 76, 77, 79, 72, 74, 76, 77, 79, 81, 83, 84, 77, 79, 81, ...]
-    
-    
+   
+       
     # Helper variables for potentiometers. Workaround because ZYNPOT_ABS didn't work
     zynpot_0 = 0
     zynpot_1 = 0
@@ -88,17 +90,37 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
     def midiproc_task(self):
         self.midiproc_task_reset_signal_handlers()
               
-        MODES = _MODES
+        # MODES = _MODES
         # scale_targets = MODES["Minor"]
         # scale_targets = MODES["Hungarian Minor"]
         scale_targets = [0, 2, 3, 6, 7, 8, 11] # is Hungarian Minor
         
         mididings.config(
-            backend='jack-rt',
+            # backend='jack-rt',
+            backend='jack',
             client_name=self.midiproc_jackname,
             in_ports=1,
             out_ports=1,
         )
+        
+        active_notes = {} # Track note_on/off status
+        def track_note_state(ev):
+            key = (ev.channel, ev.note)
+            
+            if ev.type == mididings.NOTEON:
+                active_notes[key] = ev
+                print(f"NOTEON: {ev.note}, Active: {len(active_notes)}")
+            elif ev.type == mididings.NOTEOFF:
+                active_notes.pop(key, None)
+                print(f"NOTEOFF: {ev.note}, Active: {len(active_notes)}")
+    
+            return ev
+        
+        # Debug: Note-Off speziell überwachen
+        def monitor_note_offs(ev):
+            if ev.type == mididings.NOTEOFF:
+                print(f"🔴 NOTEOFF received: note={ev.note}, channel={ev.channel}")
+            return ev
         
         
         # get parameters
@@ -125,20 +147,35 @@ class zynthian_ctrldev_keystation_pro_88_mk1(zynthian_ctrldev_base):
             ev.note = note_new # Herueka, a new Mode note event
             return ev
         
-        mididings.run(
-            [
-                # #mididings.Pass() // (mididings.Channel(2) >> (mididings.Pass() // mididings.Transpose(4) // mididings.Transpose(7)))
-                # mididings.Pass() //  mididings.Transpose(4) //  mididings.Transpose(7)
+        patch_config = [
+            # mididings.Process(track_note_state),
+            mididings.Filter(mididings.NOTEON | mididings.NOTEOFF ) >> 
+                mididings.Process( partial( translate_scale, distance = None) ),
             
-                mididings.Filter(mididings.CTRL) >> mididings.Channel(5),  # jst CTRLS to keyboard driver   
+            mididings.Process(monitor_note_offs)  >> mididings.Discard()
+        ]
+        
+        # Sichere Fallback-Lösung:
+        if not patch_config:  # Wenn Liste leer ist
+            patch_config = mididings.Pass()
+        
+        mididings.run(patch_config)
+        # mididings.run(
+        #     [
+        #         # #mididings.Pass() // (mididings.Channel(2) >> (mididings.Pass() // mididings.Transpose(4) // mididings.Transpose(7)))
+        #         # mididings.Pass() //  mididings.Transpose(4) //  mididings.Transpose(7)
+            
+        #         # mididings.Filter(mididings.CTRL) >> mididings.Channel(5),  # jst CTRLS to keyboard driver   
                 
-                mididings.Filter(mididings.NOTEON | mididings.NOTEOFF ) >> 
-                    mididings.Process( partial( translate_scale, distance = None) ),
+        #         # mididings.Filter(mididings.NOTEON | mididings.NOTEOFF ) >> 
+        #         #     mididings.Process( partial( translate_scale, distance = None) ),
                     
-                ~mididings.Filter(mididings.NOTEON | mididings.NOTEOFF) >> mididings.Pass() # pitch  bend and other controls
-                    
-            ]                  
-        )
+        #         # ~mididings.Filter(mididings.NOTEON | mididings.NOTEOFF) >> mididings.Pass() # pitch  bend and other controls
+        #         # mididings.Process(track_note_state)    
+        #         # mididings.Pass()
+        #         patch_config
+        #     ]                  
+        # )
 ###################   END of mididings   ####################################
     
     def midi_event(self, ev):
