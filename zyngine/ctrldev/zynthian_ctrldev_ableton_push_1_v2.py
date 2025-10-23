@@ -453,7 +453,7 @@ class zynthian_ctrldev_ableton_push_1_v2(zynthian_ctrldev_zynpad, zynthian_ctrld
                 # Adjust velocity (Push 1 is velocity-insensitive)
                 vel = ev[2]
                 if evtype == self.EV_NOTE_ON:
-                    vel = min(ev[2] * 2, 255)  # Boost velocity but cap at max
+                    vel = min(ev[2] * 3, 255)  # Boost velocity but cap at max
                 
                 # Forward translated event
                 new_ev = bytes([ev[0], note_translated, vel])
