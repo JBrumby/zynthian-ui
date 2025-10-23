@@ -234,11 +234,11 @@ class zynthian_ctrldev_ableton_push_1_v2(zynthian_ctrldev_zynpad, zynthian_ctrld
 ################ mididings
 
 # The midiproc task itself. It runs in a spawned process.
-    def midiproc_task(self):
+    def midiproc_task(self, jackname):
         self.midiproc_task_reset_signal_handlers()
         mididings.config(
             backend='jack-rt',
-            client_name=self.midiproc_jackname,
+            client_name=jackname,
             in_ports=1,
             out_ports=1
         )
