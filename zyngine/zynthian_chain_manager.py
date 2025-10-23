@@ -110,8 +110,7 @@ class zynthian_chain_manager:
         self.zyngines = {}  # List of instantiated engines
         self.processors = {}  # Dictionary of processor objects indexed by UID
         self.active_chain_id = None  # Active chain id
-        self.midi_chan_2_chain_ids = [list() for _ in range(
-            MAX_NUM_MIDI_CHANS)]  # Chain IDs mapped by MIDI channel
+        self.midi_chan_2_chain_ids = [list() for _ in range(MAX_NUM_MIDI_CHANS)]  # Chain IDs mapped by MIDI channel
 
         # Map of list of zctrls indexed by 24-bit ZMOP,CHAN,CC
         self.absolute_midi_cc_binding = {}
@@ -233,12 +232,7 @@ class zynthian_chain_manager:
         if chain.zmop_index is not None:
             # Enable all MIDI input devices by default => TODO: Should we allow user to define default routing?
             for zmip in range(MAX_NUM_MIDI_DEVS):
-                try:
-                    unroute = zmip in self.state_manager.ctrldev_manager.drivers and self.state_manager.ctrldev_manager.drivers[zmip].unroute_from_chains
-                except Exception as e:
-                    unroute = False
-                    logging.warning(f"ctrldev_manager => {e}")
-                lib_zyncore.zmop_set_route_from(chain.zmop_index, zmip, not unroute)
+                lib_zyncore.zmop_set_route_from(chain.zmop_index, zmip, True)
             # Enable StepSeq MIDI intput
             lib_zyncore.zmop_set_route_from(chain.zmop_index, ZMIP_STEP_INDEX, True)
             # Enable SMF sequencer MIDI intput
@@ -1176,6 +1170,9 @@ class zynthian_chain_manager:
                 self.chains[chain_id].fader_pos = chain_state["fader_pos"]
             else:
                 self.chains[chain_id].fader_pos = 0
+
+            if "zctrls" in chain_state:
+                self.chains[chain_id].set_zctrls_state(chain_state["zctrls"])
 
         self.state_manager.end_busy("set_chain_state")
 

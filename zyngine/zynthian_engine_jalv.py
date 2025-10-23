@@ -18,6 +18,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 # GNU General Public License for more details.
 #
+#
 # For a full copy of the GNU General Public License see the LICENSE.txt file.
 #
 # ******************************************************************************
@@ -84,6 +85,16 @@ class zynthian_engine_jalv(zynthian_engine):
         'http://looperlative.com/plugins/lp3-basic': zynthian_engine.ui_dir + "/zyngui/zynthian_widget_looper.py",
         'http://aidadsp.cc/plugins/aidadsp-bundle/rt-neural-loader': zynthian_engine.ui_dir + "/zyngui/zynthian_widget_aidax.py",
         'http://github.com/mikeoliphant/neural-amp-modeler-lv2': zynthian_engine.ui_dir + "/zyngui/zynthian_widget_nam.py"
+    }
+
+    # For certain plugins its beneficial to set parameters not set
+    # in preset files to their default values, for consistent loading
+    # of preset files in the event of the parameter list being
+    # extended from one plugin version to the next. For these we add
+    # -D to the jalv argument list.
+
+    plugins_custom_jalv_args = {
+        'https://butoba.net/homepage/mimid.html': [ "-D" ]
     }
 
     # ------------------------------------------------------------------------------
@@ -218,23 +229,15 @@ class zynthian_engine_jalv(zynthian_engine):
                 if not self.plugin_name.endswith("v1"):
                     self.command_env['DISPLAY'] = "X"
 
+            # Add custom (per-plugin) jalv arguments:
+            if self.plugin_url in self.plugins_custom_jalv_args:
+                self.command = self.command[:1] + self.plugins_custom_jalv_args[self.plugin_url] + self.command[1:]
+
             # Use jalv's development version =>
             #self.command[0] = "/zynthian/zynthian-sw/jalv_asyncli/build/" + self.command[0]
-
             self.command_prompt = ">"
-
             # Jalv which uses PWD as the root for presets
             self.command_cwd = zynthian_engine.my_data_dir + "/presets/lv2"
-
-            output = self.start()
-
-            # Get Plugin & Jack names from Jalv starting text ...
-            if output:
-                for line in output.split("\n"):
-                    if line[0:10] == "JACK Name:":
-                        self.jackname = line[11:].strip()
-                        logging.debug("Jack Name => {}".format(self.jackname))
-                        break
 
             # Setup MIDI Controllers
             self._ctrls = []
@@ -284,6 +287,16 @@ class zynthian_engine_jalv(zynthian_engine):
             except:
                 self.custom_gui_fpath = None
 
+            # Instance jalv host with the plugin URI
+            output = self.start()
+            # Get Plugin & Jack names from Jalv starting text ...
+            if output:
+                for line in output.split("\n"):
+                    if line[0:10] == "JACK Name:":
+                        self.jackname = line[11:].strip()
+                        logging.debug("Jack Name => {}".format(self.jackname))
+                        break
+
         # Get bank & presets info
         self.load_preset_info()
 
@@ -323,7 +336,10 @@ class zynthian_engine_jalv(zynthian_engine):
         if self.proc:
             try:
                 logging.info("Stopping Engine " + self.name)
-                self.proc_cmd("")
+                try:
+                    self.proc.stdin.writelines(["\n"])
+                except Exception as e:
+                    logging.error(f"Exception while ending jalv => {e}")
                 self.proc_exit = True
                 self.proc.terminate()
                 try:
@@ -374,7 +390,6 @@ class zynthian_engine_jalv(zynthian_engine):
             if line:
                 self.proc_poll_parse_line(line)
 
-
     def proc_poll_parse_line(self, line):
         #logging.debug(f"{self.jackname} PARSE => " + line)
         match line[0:5]:
@@ -394,7 +409,6 @@ class zynthian_engine_jalv(zynthian_engine):
         parts = line.split("=")
         if len(parts) == 2:
             symparts = parts[0].split("#", maxsplit=1)
-            #logging.debug(f"#CTR> {symparts[1]} ({symparts[0]}) = {val}")
             try:
                 zctrl = self.lv2_zctrl_dict[symparts[1]]
                 if zctrl.is_path:
@@ -405,7 +419,12 @@ class zynthian_engine_jalv(zynthian_engine):
                     except Exception as e:
                         logging.warning(f"Wrong controller value when parsing jalv output => {line}")
                         return
-                zctrl.set_value(val, False)
+                #logging.debug(f"#CTR> {symparts[1]} ({symparts[0]}) = {val}")
+                if zctrl.get_ignore_engine_fb():
+                    #logging.debug(f"Ignoring feedback value for {zctrl.symbol} from {self.name} => {val}")
+                    pass
+                else:
+                    zctrl.set_value(val, False)
                 if zctrl.graph_path is None:
                     try:
                         zctrl.graph_path = int(symparts[0])
@@ -414,7 +433,7 @@ class zynthian_engine_jalv(zynthian_engine):
                         logging.warning(f"Cant't parse controller index from jalv output: {line}")
             except Exception as e:
                 # TODO This shouldn't happen when property parameters are fully implemented
-                logging.warning(f"Unknown controller when parsing jalv output => {line}")
+                logging.warning(f"Unknown controller symbol when parsing jalv output => {symparts[1]} ({symparts[0]})")
         else:
             logging.warning(f"Wrong controller format when parsing jalv output => {line}")
 
@@ -563,7 +582,7 @@ class zynthian_engine_jalv(zynthian_engine):
                 logging.error(e)
 
     # ----------------------------------------------------------------------------
-    # Preset Managament
+    # Preset Management
     # ----------------------------------------------------------------------------
 
     def get_preset_list(self, bank, processor=None):
