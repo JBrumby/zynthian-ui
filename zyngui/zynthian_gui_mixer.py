@@ -945,6 +945,7 @@ class zynthian_gui_mixer(zynthian_gui_base.zynthian_gui_base):
     def build_view(self):
         """ Function to handle showing display
         """
+        self.refresh_visible_strips()
         if zynthian_gui_config.enable_touch_navigation and self.moving_chain or self.zynmixer.midi_learn_zctrl:
             self.show_back_button()
 
@@ -1082,7 +1083,7 @@ class zynthian_gui_mixer(zynthian_gui_base.zynthian_gui_base):
 
     def cb_all_notes_off(self, chan=None):
         for strip in self.visible_mixer_strips:
-            if strip.chain and strip.chain.is_midi() and (chan is None or chain.midi_chan == chan):
+            if strip.chain and strip.chain.is_midi() and (chan is None or strip.chain.midi_chan == chan):
                 for i in range(0, 4):
                     self.main_canvas.itemconfig(strip.pedals[i], state=tkinter.HIDDEN)
 

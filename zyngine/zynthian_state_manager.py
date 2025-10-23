@@ -611,6 +611,9 @@ class zynthian_state_manager:
                 status_midi_player = libsmf.getPlayState()
                 if self.status_midi_player != status_midi_player:
                     self.status_midi_player = status_midi_player
+                    if status_midi_player == 0:
+                        self.zynseq.transport_stop("zynsmf")
+
                     zynsigman.send(zynsigman.S_STATE_MAN, self.SS_MIDI_PLAYER_STATE, state=status_midi_player)
 
                 # MIDI Recorder
@@ -1065,7 +1068,9 @@ class zynthian_state_manager:
             self.end_busy("save snapshot")
             return False
 
-        self.last_snapshot_fpath = fpath
+        if basename(fpath) != "last_state.zss":
+            self.last_snapshot_fpath = fpath
+
         self.end_busy("save snapshot")
         return True
 
@@ -1222,16 +1227,19 @@ class zynthian_state_manager:
                 for proc in self.chain_manager.processors.values():
                     proc.set_midi_autolearn(True)
 
-            if fpath == self.last_snapshot_fpath and "last_state_fpath" in state:
-                self.last_snapshot_fpath = state["last_snapshot_fpath"]
-            else:
-                self.last_snapshot_fpath = fpath
-
+            # Save last snapshot info and get snapshot's program number
             self.last_snapshot_count += 1
-            try:
-                self.snapshot_program = int(basename(fpath[:3]))
-            except:
-                pass
+            if basename(fpath) != "last_state.zss":
+                self.last_snapshot_fpath = fpath
+                program = self.get_program_from_snapshot_fpath(fpath)
+            elif "last_snapshot_fpath" in state:
+                self.last_snapshot_fpath = state["last_snapshot_fpath"]
+                program = self.get_program_from_snapshot_fpath(self.last_snapshot_fpath)
+            else:
+                program = None
+            # Try to get program number
+            if program is not None:
+                self.snapshot_program = program
 
         except Exception as e:
             state = None
@@ -1250,6 +1258,14 @@ class zynthian_state_manager:
 
         self.end_busy("load snapshot")
         return state
+
+    @staticmethod
+    def get_program_from_snapshot_fpath(fpath):
+        try:
+            res = int(basename(fpath)[:3])
+            return res
+        except Exception as e:
+            return None
 
     def set_snapshot_midi_bank(self, bank):
         """Set the current snapshot bank
@@ -1274,10 +1290,14 @@ class zynthian_state_manager:
             bank = self.snapshot_bank
         if bank is None:
             return  # Don't load snapshot if invalid bank selected
-        files = glob(f"{self.snapshot_dir}/{bank}/{program:03d}-*.zss")
-        if files:
-            self.load_snapshot(files[0])
-            return True
+        if 0 <= program <= 127:
+            logging.debug(f"Searching snapshot by program number ({program}) => {self.snapshot_dir}/{bank}/{program:03d}-*.zss")
+            files = glob(f"{self.snapshot_dir}/{bank}/{program:03d}-*.zss")
+            if files:
+                self.load_snapshot(files[0])
+                return True
+        else:
+            logging.warning(f"Program number ({program}) out of range")
         return False
 
     def backup_snapshot(self, path):
@@ -1523,6 +1543,26 @@ class zynthian_state_manager:
             zynautoconnect.request_audio_connect(True)
         return True
 
+    def get_next_zs3_index(self):
+        used_indexes = []
+        for zid, state in self.zs3.items():
+            if state['title'].startswith("ZS3-"):
+                try:
+                    used_indexes.append(int(state['title'].split('-')[1]))
+                except:
+                    pass
+            elif zid.startswith("zs3-"):
+                try:
+                    used_ids.append(int(zid.split('-')[1]))
+                except:
+                    pass
+
+        used_indexes.sort()
+        try:
+            return max(used_indexes[-1] + 1, len(self.zs3))
+        except:
+            return len(self.zs3)
+
     def save_zs3(self, zs3_id=None, title=None):
         """Store current state as ZS3
 
@@ -1530,30 +1570,21 @@ class zynthian_state_manager:
         title : ZS3 title (Default: Create new title)
         """
 
+        index = self.get_next_zs3_index()
+
         if zs3_id is None:
-            # Get next id and name
-            used_ids = []
-            for zid in self.zs3:
-                if zid.startswith("zs3-"):
-                    try:
-                        used_ids.append(int(zid.split('-')[1]))
-                    except:
-                        pass
-            used_ids.sort()
-            # Get next free zs3 id
-            for index in range(1, len(used_ids) + 2):
-                if index not in used_ids:
-                    zs3_id = f"zs3-{index}"
-                    break
+            zs3_id = f"zs3-{index}"
 
         if title is None:
             title = self.midi_learn_pc
 
         if not title:
+            # Existing ZS3s => keep current title
             if zs3_id in self.zs3:
                 title = self.zs3[zs3_id]['title']
+            # New ZS3 => autogenerate title
             else:
-                title = zs3_id.upper()
+                title = f"ZS3-{index}"
 
         # Initialise zs3
         self.zs3[zs3_id] = {
@@ -1872,6 +1903,8 @@ class zynthian_state_manager:
                     routed_chains.append(ch)
             mcstate[uid] = {
                 "zmip_input_mode": bool(lib_zyncore.zmip_get_flag_active_chain(izmip)),
+                "zmip_system": bool(lib_zyncore.zmip_get_flag_system(izmip)),
+                "zmip_system_rt": bool(lib_zyncore.zmip_get_flag_system_rt(izmip)),
                 "disable_ctrldev": self.ctrldev_manager.get_disabled_driver(uid),
                 "ctrldev_driver": self.ctrldev_manager.get_driver_class_name(izmip),
                 "routed_chains": routed_chains
@@ -1911,12 +1944,20 @@ class zynthian_state_manager:
                 except:
                     pass
                 try:
+                    lib_zyncore.zmip_set_flag_system(izmip, bool(state["zmip_system"]))
+                except:
+                    pass
+                try:
+                    lib_zyncore.zmip_set_flag_system_rt(izmip, bool(state["zmip_system_rt"]))
+                except:
+                    pass
+                try:
                     self.aubio_in = state["audio_in"]
                 except:
                     pass
                 zynautoconnect.update_midi_in_dev_mode(izmip)
                 try:
-                    #TODO: Use ctrldev_driver=None to disable driver
+                    # TODO: Use ctrldev_driver=None to disable driver
                     if state["disable_ctrldev"]:
                         self.ctrldev_manager.unload_driver(izmip, True)
                     else:
@@ -2031,6 +2072,7 @@ class zynthian_state_manager:
         if midi_profile_fpath:
             zynconf.load_config(True, midi_profile_fpath)
             zynthian_gui_config.set_midi_config()
+            zynthian_gui_config.set_mmc_config()
             self.init_midi()
             self.init_midi_services()
             zynautoconnect.request_midi_connect()
@@ -2172,7 +2214,7 @@ class zynthian_state_manager:
                     break
         if not filename:
             path = capture_dir_sdc
-            filename = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+            filename = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         if self.last_snapshot_fpath and len(self.last_snapshot_fpath) > 4:
             filename += "_" + os.path.basename(self.last_snapshot_fpath[:-4])
         filename = filename.replace("/", ";").replace(">", ";").replace(" ; ", ";")
