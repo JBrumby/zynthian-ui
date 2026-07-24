@@ -5,7 +5,7 @@
 #
 # Zynthian GUI Splash Class
 #
-# Copyright (C) 2015-2024 Fernando Moyano <jofemodo@zynthian.org>
+# Copyright (C) 2015-2026 Fernando Moyano <jofemodo@zynthian.org>
 #
 # ******************************************************************************
 #
@@ -24,44 +24,34 @@
 # ******************************************************************************
 
 import tkinter
+from PIL import Image, ImageDraw, ImageFont
 import logging
 import os
 
 # Zynthian specific modules
 from zyngui import zynthian_gui_config
+from zyngui.zynthian_gui_fullscreen_modal import zynthian_gui_fullscreen_modal
 
 # ------------------------------------------------------------------------------
 # Zynthian Splash GUI Class
 # ------------------------------------------------------------------------------
 
 
-class zynthian_gui_splash:
+class zynthian_gui_splash(zynthian_gui_fullscreen_modal):
 
     def __init__(self):
-        self.shown = False
+        super().__init__()
         self.zyngui = zynthian_gui_config.zyngui
-        self.width = zynthian_gui_config.display_width
-        self.height = zynthian_gui_config.display_height
 
-        self.canvas = tkinter.Canvas(zynthian_gui_config.top,
-                                     width=self.width,
-                                     height=self.height,
+        self.canvas = tkinter.Canvas(self,
                                      bg=zynthian_gui_config.color_bg,
                                      bd=0,
                                      highlightthickness=0)
-
+        self.canvas.grid(sticky="nsew")
         self.image = None
 
-    def hide(self):
-        if self.shown:
-            self.shown = False
-            self.canvas.grid_forget()
-            if zynthian_gui_config.touch_keypad:
-                zynthian_gui_config.touch_keypad.show()
-
     def show(self, text):
-        if self.zyngui.test_mode:
-            logging.warning("TEST_MODE: {}".format(self.__class__.__module__))
+        font_family = zynthian_gui_config.font_family
         if len(text) > 40:
             font_size = 28
         else:
@@ -70,22 +60,27 @@ class zynthian_gui_splash:
         pos_x = self.width / 2 - strlen / 2
         pos_y = int(self.height / 10)
         try:
-            os.system('convert -strip -family \\"{}\\" -pointsize {} -fill white -draw "text {},{} \\"{}\\"" {}/img/fb_zynthian_boot.jpg {}/img/fb_zynthian_message.jpg'.format(
-                zynthian_gui_config.font_family, font_size, pos_x, pos_y, text, os.environ.get("ZYNTHIAN_CONFIG_DIR"), os.environ.get("ZYNTHIAN_CONFIG_DIR")))
-            self.img = tkinter.PhotoImage(
-                file="/zynthian/config/img/fb_zynthian_message.jpg")
+            config_dir = os.environ.get("ZYNTHIAN_CONFIG_DIR")
+            boot_file = f"{config_dir}/img/fb_zynthian_boot.jpg"
+            fpath = f"{config_dir}/img/fb_zynthian_message.jpg"
+
+            #os.system(f'convert -strip -family \\"{font_family}\\" -pointsize {font_size} -fill white -draw "text {pos_x},{pos_y} \\"{text}\\"" {config_dir}/img/fb_zynthian_boot.jpg {config_dir}/img/fb_zynthian_message.jpg')
+
+            img = Image.open(boot_file).convert("RGB")
+            draw = ImageDraw.Draw(img)
+            #font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+            font_path = "/usr/share/fonts/truetype/Audiowide/Audiowide-Regular.ttf"
+            draw.text((pos_x, pos_y), text, fill="white", font=ImageFont.truetype(font_path, font_size))
+            img.save(fpath, "PNG")
+
+            self.img = tkinter.PhotoImage(file=fpath)
             if self.image is None:
-                self.image = self.canvas.create_image(
-                    0, 0, anchor='nw', image=self.img)
+                self.image = self.canvas.create_image(0, 0, anchor='nw', image=self.img)
             else:
                 self.canvas.itemconfig(self.image, image=self.img)
-        except:
-            pass
-        if not self.shown:
-            if zynthian_gui_config.touch_keypad:
-                zynthian_gui_config.touch_keypad.hide()
-            self.shown = True
-            self.canvas.grid()
+        except Exception as e:
+            logging.error(e)
+        super().show()
 
     def zynpot_cb(self, i, dval):
         pass

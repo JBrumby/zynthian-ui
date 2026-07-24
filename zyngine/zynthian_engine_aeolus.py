@@ -32,9 +32,9 @@ from os.path import exists as file_exists
 
 # Zynthian specific modules
 import zynautoconnect
-from . import zynthian_engine
 from zynconf import ServerPort
 from zyncoder.zyncore import lib_zyncore
+from zyngine.zynthian_engine import zynthian_engine
 from zyngine.zynthian_processor import zynthian_processor
 
 # ------------------------------------------------------------------------------
@@ -324,7 +324,6 @@ class zynthian_engine_aeolus(zynthian_engine):
                 chain = chain_manager.get_chain(chain_id)
                 if proc_i:
                     chain.audio_out = []
-                    chain.mixer_chan = None
                 processor.refresh_controllers()
                 proc_i += 1
 

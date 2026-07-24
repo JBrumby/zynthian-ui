@@ -4,7 +4,7 @@
 #
 # zynthian controller
 #
-# Copyright (C) 2015-2025 Fernando Moyano <jofemodo@zynthian.org>
+# Copyright (C) 2015-2026 Fernando Moyano <jofemodo@zynthian.org>
 #
 # ******************************************************************************
 #
@@ -23,8 +23,8 @@
 # ******************************************************************************
 
 import math
-import liblo
 import logging
+import pyliblo3 as liblo
 from time import monotonic
 from threading import Timer
 
@@ -49,46 +49,51 @@ class zynthian_controller:
         """
         self.reset(engine, symbol, options)
 
-    def reset(self, engine, symbol, options=None):
+    def reset(self, engine, symbol, options=None, full=True):
         """ Reset to default settings
 
         engine - Engine object containing parameter to control
         symbol - String identifying the control
         options - Optional dictionary of controller {parameter:value} pairs
+        full - True to fully reset or False to retain core configuration and value
         """
 
         self.engine = engine
         self.symbol = symbol
         self.processor = None
         self.name = self.short_name = symbol
-        self.group_symbol = "ctrls"
-        self.group_name = "Ctrls"
+        self.group_symbol = "params"
+        self.group_name = "Params"
         self.readonly = False
 
-        self.value = 0  # Absolute value of the control
+        if full:
+            self.value = 0  # Absolute value of the control
         self.value_default = None  # Default value to use when reset control
-        self.value_min = None  # Minimum value of control range
-        # Mid-point value of control range (used for toggle controls)
-        self.value_mid = None
-        self.value_max = None  # Maximum value of control range
-        self.value_range = 0  # Span of permissible values
-        # Factor to scale each up/down nudge
+        self.value_min = None      # Minimum value of control range
+        self.value_max = None      # Maximum value of control range
+        self.value_range = 0       # Span of permissible values
+        self.value_mid = None      # Mid-point value of control range (used for toggle controls)
+
         # TODO: This is not set if configure is not called or options not passed
-        self.nudge_factor = None
+        self.nudge_factor = None       # Factor to scale each up/down nudge
         self.nudge_factor_fine = None  # Fine factor to scale
+
         self.labels = None  # List of discrete value labels
         self.ticks = None  # List of discrete value ticks
         self.range_reversed = False  # Flag if ticks order is reversed
         self.is_toggle = False  # True if control is Boolean toggle
+        self.is_trigger = False  # True if control is one-shot trigger
         self.is_integer = True  # True if control is Integer
         self.is_logarithmic = False  # True if control uses logarithmic scale
-        self.is_path = False  # True if the control is a file path (i.e. LV2's atom:Path)
-        self.path_file_types = None  # List of supported file types
-        self.path_dir_names = None  # List of directory names to look for files
-        self.path_preload = False  # Flag for enable/disable file preload
+        self.is_bypass = False  # True for the processor's bypass controller, if any. Shouldn't be more than one by processor.
+        self.bypass_value = 0   # Value that bypass the processor
+        if full:
+            self.is_path = False  # True if the control is a file path (i.e. LV2's atom:Path)
+            self.path_file_types = None  # List of supported file types
+            self.path_dir_names = None  # List of directory names to look for files
+            self.path_preload = False  # Flag for enable/disable file preload
         self.not_on_gui = False  # True to hint to GUI to show control
-        self.display_priority = 0  # Hint of order in which to display control (higher comes first)
-
+        self.display_priority = float("inf")  # Hint of order in which to display control (higher comes first)
         self.is_dirty = True  # True if control value changed since last UI update
         self.ignore_engine_fb_ts = None  # Ignore next feedback value from the engine until this timestamp is over
 
@@ -96,17 +101,20 @@ class zynthian_controller:
         self.midi_chan = None  # MIDI channel to send CC messages from control
         self.midi_cc = None  # MIDI CC number to send CC messages from control
         self.midi_autolearn = True  # Auto-learn MIDI-CC based controllers
-        self.midi_feedback = None  # [chan,cc] for MIDI control feedback
+        self.midi_cc_val1 = None    # MIDI CC => controller value when CC value is 0
+        self.midi_cc_val2 = None    # MIDI CC => controller value when CC value is 127
+        self.midi_cc_range = None   # self.midi_cc_val2 - self.midi_cc_val1
         self.midi_cc_momentary_switch = False
         self.midi_cc_mode = -1                  # CC mode: -1=unknown,  0=abs, 1=rel1, 2=rel2, 3=rel3
         self.midi_cc_mode_detecting = 0         # Used by CC mode detection algorithm
         self.midi_cc_mode_detecting_ts = 0      # Used by CC mode detection algorithm
         self.midi_cc_mode_detecting_count = 0   # Used by CC mode detection algorithm
         self.midi_cc_mode_detecting_zero = 0    # Used by CC mode detection algorithm
-        self.midi_cc_debounce = False # True to enable debounce of toggle
+        self.midi_cc_debounce = False  # True to enable debounce of toggle
         self.midi_cc_debounce_timer = None
         self.osc_path = None  # OSC path to send value to
         self.graph_path = None  # Complex map of control to engine parameter
+        self.send_value_cb = None  # Called when value changes to send feedback to MIDI controllers
 
         self.label2value = None  # Dictionary for fast conversion from discrete label to value
         self.value2label = None  # Dictionary for fast conversion from discrete value to label
@@ -134,8 +142,11 @@ class zynthian_controller:
             self.value = options['value']
         if 'value_default' in options:
             self.value_default = options['value_default']
+            if 'value' not in options:
+                self.value = self.value_default
         if 'value_min' in options:
             self.value_min = options['value_min']
+            self.nudge_factor = None
         if 'value_max' in options:
             value_max = options['value_max']
             # Selector
@@ -151,15 +162,19 @@ class zynthian_controller:
             elif isinstance(value_max, int):
                 self.value_max = value_max
                 self.is_integer = True
+                self.nudge_factor = None
             elif isinstance(value_max, float):
                 self.value_max = value_max
                 self.is_integer = False
+                self.nudge_factor = None
         if 'labels' in options:
             self.labels = options['labels']
         if 'ticks' in options:
             self.ticks = options['ticks']
         if 'is_toggle' in options:
             self.is_toggle = options['is_toggle']
+        if 'is_trigger' in options:
+            self.is_trigger = options['is_trigger']
         if 'midi_cc_momentary_switch' in options:
             self.midi_cc_momentary_switch = options['midi_cc_momentary_switch']
         if 'midi_cc_debounce' in options:
@@ -168,10 +183,14 @@ class zynthian_controller:
             self.is_integer = options['is_integer']
         if 'nudge_factor' in options:
             self.nudge_factor = options['nudge_factor']
+        if 'nudge_factor_fine' in options:
+            self.nudge_factor_fine = options['nudge_factor_fine']
         if 'is_logarithmic' in options:
             self.is_logarithmic = options['is_logarithmic']
         if 'is_path' in options:
             self.is_path = options['is_path']
+        if self.is_path and not self.value:
+            self.value = "" # Ensure string value
         if 'path_file_types' in options:
             self.path_file_types = options['path_file_types']
         if 'path_dir_names' in options:
@@ -194,6 +213,13 @@ class zynthian_controller:
             self.display_priority = options['display_priority']
         if 'envelope' in options and options['envelope'] is not None:
             self.envelope = options['envelope']
+        if 'filter' in options and options['filter'] is not None:
+            self.filter = options['filter']
+        if 'is_bypass' in options:
+            self.is_bypass = options['is_bypass']
+        if 'bypass_value' in options:
+            self.bypass_value = options['bypass_value']
+
         self._configure()
 
     def _configure(self):
@@ -207,6 +233,15 @@ class zynthian_controller:
             return
 
         if self.labels:
+            # Detect trigger (one-shot)
+            if len(self.labels) == 1:
+                self.is_trigger = True
+                if not self.ticks:
+                    if self.value_min is None:
+                        self.value_min = 0
+                    if self.value_max is None:
+                        self.value_max = 127
+
             # Detect toggle (on/off)
             if len(self.labels) == 2:
                 self.is_toggle = True
@@ -215,6 +250,8 @@ class zynthian_controller:
                         self.value_min = 0
                     if self.value_max is None:
                         self.value_max = 127
+            elif len(self.labels) > 2:
+                self.is_toggle = False # Handle change of label length from 2 (which asserts toggle)
 
             # Generate ticks if needed ...
             if not self.ticks:
@@ -226,24 +263,18 @@ class zynthian_controller:
                     self.value_max = n - 1
                 value_range = self.value_max - self.value_min
                 if n == 1:
-                    # This shouldn't happen!
-                    self.value_max = self.value_min
-                    self.ticks.append(self.value_min)
+                    self.ticks.append(self.value_max)
                 elif self.is_integer:
                     for i in range(n):
-                        self.ticks.append(
-                            self.value_min + int(i * value_range / (n - 1)))
+                        self.ticks.append(self.value_min + int(i * value_range / (n - 1)))
                 else:
                     for i in range(n):
-                        self.ticks.append(
-                            self.value_min + i * value_range / (n - 1))
+                        self.ticks.append(self.value_min + i * value_range / (n - 1))
 
             # Calculate min, max
             if self.ticks[0] <= self.ticks[-1]:
-                if self.value_min is None:
-                    self.value_min = self.ticks[0]
-                if self.value_max is None:
-                    self.value_max = self.ticks[-1]
+                self.value_min = self.ticks[0]
+                self.value_max = self.ticks[-1]
                 self.range_reversed = False
             else:
                 self.value_min = self.ticks[-1]
@@ -271,11 +302,19 @@ class zynthian_controller:
         if self.value_default is None:
             self.value_default = self.value
 
+        if self.midi_cc_val1 is None:
+            self.midi_cc_val1 = self.value_min
+        if self.midi_cc_val2 is None:
+            self.midi_cc_val2 = self.value_max
+        self.midi_cc_range = self.midi_cc_val2 - self.midi_cc_val1
+
+        self.is_dirty = True
+
         if not self.nudge_factor:
             if self.is_logarithmic:
                 self.nudge_factor = 0.01  # TODO: Use number of divisions
                 self.nudge_factor_fine = 0.003 * self.nudge_factor
-            elif not self.is_integer and not self.is_toggle:
+            elif not self.is_integer and not self.is_toggle and not self.is_trigger:
                 if self.value_range <= 2.0:
                     self.nudge_factor = 0.01
                     self.nudge_factor_fine = 0.001
@@ -319,9 +358,6 @@ class zynthian_controller:
 
         #logging.debug(f"CTRL '{self.name}' => RANGE={self.value_range} NUDGE FACTOR={self.nudge_factor}, FINE={self.nudge_factor_fine}, LOGARITHMIC={self.is_logarithmic}")
 
-        if self.midi_feedback is None and self.midi_chan is not None and self.midi_cc is not None:
-            self.midi_feedback = [self.midi_chan, self.midi_cc]
-
     def set_readonly(self, flag=True):
         if flag != self.readonly:
             self.readonly = flag
@@ -341,6 +377,12 @@ class zynthian_controller:
                 return False
         else:
             return False
+
+    def set_send_value_cb(self, cb_func):
+        self.send_value_cb = cb_func
+
+    def reset_send_value_cb(self):
+        self.send_value_cb = None
 
     def get_path(self):
         if self.osc_path:
@@ -406,6 +448,11 @@ class zynthian_controller:
                 self.midi_cc_debounce_timer.start()
             else:
                 self.set_value(value, send=True)
+        elif self.ticks:
+            idx = self.ticks.index(self.value) + 1
+            if idx >= len(self.ticks):
+                idx = 0
+            self.set_value(self.ticks[idx], send=True)
 
     def _set_value(self, val):
         if self.is_path:
@@ -448,7 +495,10 @@ class zynthian_controller:
         if old_val == self.value:
             return
         self.send_value(send)
-        self.is_dirty = True
+        if self.is_trigger:
+            self.value = self.value_min
+        else:
+            self.is_dirty = True
 
     def send_value(self, send=True):
         mval = None
@@ -469,10 +519,15 @@ class zynthian_controller:
                 except Exception as e:
                     logging.warning("Can't send controller '{}' => {}".format(self.symbol, e))
 
-        # Send feedback to MIDI controllers => What MIDI controllers? Those selected as MIDI-out?
-        # TODO: Set midi_feeback to MIDI learn
-        if self.midi_feedback:
-            self.send_midi_feedback(mval)
+        if self.send_value_cb and callable(self.send_value_cb):
+            try:
+                self.send_value_cb(self)
+            except Exception as e:
+                logging.warning(f"Can't send value change feedback for {self.symbol} => {e}")
+
+        if self.is_bypass:
+            zynsigman.send_queued(zynsigman.S_PROCESSOR, zynsigman.SS_PROCESSOR_BYPASS, zctrl=self)
+
 
     def send_midi_cc(self, mval=None):
         if mval is None:
@@ -491,14 +546,6 @@ class zynthian_controller:
         else:
             lib_zyncore.ui_send_ccontrol_change(self.midi_chan, self.midi_cc, mval)
 
-    def send_midi_feedback(self, mval=None):
-        if mval is None:
-            mval = self.get_ctrl_midi_val()
-        try:
-            lib_zyncore.ctrlfb_send_ccontrol_change(self.midi_feedback[0], self.midi_feedback[1], mval)
-        except Exception as e:
-            logging.warning("Can't send controller feedback '{}' => Val={}".format(self.symbol, e))
-
     # Get index of list entry closest to given value
     def get_value2index(self, val=None):
         if val is None:
@@ -512,8 +559,6 @@ class zynthian_controller:
                     if ndval < dval:
                         dval = ndval
                         index = i
-                    else:
-                        break
                 return index
             else:
                 return None
@@ -527,6 +572,8 @@ class zynthian_controller:
         if i is not None:
             return self.labels[i]
         else:
+            if type(val) is float:
+                return f"{val:.3f}"
             return val
 
     def get_label2value(self, label):
@@ -538,15 +585,16 @@ class zynthian_controller:
 
         except Exception as e:
             logging.error(e)
+            return 0
 
     def get_ctrl_midi_val(self):
         try:
-            if self.value_range == 0:
+            if self.midi_cc_range == 0:
                 return 0
             elif self.is_logarithmic:
-                val = int(127 * math.log10((9 * self.value - (10 * self.value_min - self.value_max)) / self.value_range))
+                val = int(127 * math.log10((9 * self.value - (10 * self.midi_cc_val1 - self.midi_cc_val2)) / self.midi_cc_range))
             else:
-                val = min(127, int(127 * (self.value - self.value_min) / self.value_range))
+                val = max(0, min(127, int(127 * (self.value - self.midi_cc_val1) / self.midi_cc_range)))
         except Exception as e:
             logging.error(e)
             val = 0
@@ -581,6 +629,11 @@ class zynthian_controller:
                 state['value'] = self.value
         except:
             state['value'] = self.value
+
+        if self.midi_cc_val1 is not None and self.midi_cc_val1 != self.value_min:
+            state['midi_cc_val1'] = self.midi_cc_val1
+        if self.midi_cc_val2 is not None and self.midi_cc_val2 != self.value_max:
+            state['midi_cc_val2'] = self.midi_cc_val2
         if self.midi_cc_momentary_switch:
             state['midi_cc_momentary_switch'] = self.midi_cc_momentary_switch
         if self.midi_cc_debounce:
@@ -599,14 +652,11 @@ class zynthian_controller:
         # CC mode not detected yet!
         if self.midi_cc_mode == -1:
             self.midi_cc_mode_detect(val)
-
         # CC mode absolute
         if self.midi_cc_mode == 0:
             if self.range_reversed:
                 val = 127 - val
-            if self.is_logarithmic:
-                value = self.value_min + self.value_range * (math.pow(10, val/127) - 1) / 9
-            elif self.is_toggle:
+            if self.is_toggle:
                 if self.midi_cc_momentary_switch:
                     if val >= 64:
                         self.toggle()
@@ -617,7 +667,10 @@ class zynthian_controller:
                     else:
                         value = self.value_min
             else:
-                value = self.value_min + val * self.value_range / 127
+                if self.is_logarithmic:
+                    value = self.midi_cc_val1 + self.midi_cc_range * (math.pow(10, val/127) - 1) / 9
+                else:
+                    value = self.midi_cc_val1 + val * self.midi_cc_range / 127
             # Debounce
             if self.midi_cc_debounce:
                 if self.midi_cc_debounce_timer:

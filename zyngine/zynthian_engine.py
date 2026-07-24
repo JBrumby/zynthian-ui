@@ -27,15 +27,15 @@ import re
 import json
 import glob
 import copy
-import liblo
 import logging
 import pexpect
 import fnmatch
+import pyliblo3 as liblo
 from time import sleep
 
+import zynconf
 import zynautoconnect
-from . import zynthian_controller
-from zyngui import zynthian_gui_config
+import zyngine.zynthian_controller as zynthian_controller
 
 # --------------------------------------------------------------------------------
 # Basic Engine Class: Spawn a process & manage IPC communication using pexpect
@@ -166,6 +166,7 @@ class zynthian_engine(zynthian_basic_engine):
     def __init__(self, state_manager=None):
         super().__init__()
         self.state_manager = state_manager
+        self.chain_manager = state_manager.chain_manager
 
         self.custom_gui_fpath = None
 
@@ -191,6 +192,7 @@ class zynthian_engine(zynthian_basic_engine):
         self.preset_favs = None
         self.preset_favs_fpath = None
         self.show_favs_bank = True
+        self.monitors_dict = {}
 
     def reset(self):
         pass
@@ -214,6 +216,12 @@ class zynthian_engine(zynthian_basic_engine):
 
     def refresh(self):
         pass
+
+    def get_monitors_dict(self):
+        return self.monitors_dict
+
+    def reset_monitors(self):
+        self.monitors_dict = {}
 
     # ---------------------------------------------------------------------------
     # OSC Management
@@ -305,7 +313,7 @@ class zynthian_engine(zynthian_basic_engine):
         return sorted(res, key=str.casefold)
 
     @classmethod
-    def get_filelist(cls, dpath, fext, include_dirs=False, exclude_empty_dirs=True):
+    def get_filelist(cls, dpath, fext, include_dirs=False, exclude_empty_dirs=True, info=None):
         files = []
         dirs = []
         if isinstance(dpath, str):
@@ -329,10 +337,16 @@ class zynthian_engine(zynthian_basic_engine):
                             if dn != '_':
                                 title = dn + '/' + title
                             # print("filelist => " + title)
-                            files.append([os.path.join(dp, f), i, title, dn, f, ext])
+                            row = [os.path.join(dp, f), i, title, dn, f, ext]
+                            if info:
+                                row.append(info[1])
+                            files.append(row)
                             i += 1
                     elif include_dirs and os.path.isdir(path) and (not exclude_empty_dirs or cls.find_some_preset_file(path, fext)):
-                        dirs.append([path, i, "> " + f, dn, f])
+                        row = [path, i, "> " + f, dn, f]
+                        if info:
+                            row.append(info[0])
+                        dirs.append(row)
                         i += 1
             except Exception as e:
                 #logging.warning(f"Can't access directory '{dp}' => {e}")
@@ -369,7 +383,7 @@ class zynthian_engine(zynthian_basic_engine):
 
     # Get bank dir list
     @classmethod
-    def get_bank_dirlist(cls, fexts=None, root_bank_dirs=None, recursion=1, exclude_empty=True, internal_include_empty=False):
+    def get_bank_dirlist(cls, fexts=None, root_bank_dirs=None, recursion=1, exclude_empty=True, internal_include_empty=False, info=None):
         if fexts is None:
             fexts = cls.preset_fexts
         if root_bank_dirs is None:
@@ -378,11 +392,11 @@ class zynthian_engine(zynthian_basic_engine):
                                      recursion=recursion,
                                      exclude_empty=exclude_empty,
                                      internal_include_empty=internal_include_empty,
-                                     dirs_only=True)
+                                     dirs_only=True, info=info)
 
     # Get dir & file list
     @classmethod
-    def get_dir_file_list(cls, fexts, root_dirs, recursion=1, exclude_empty=True, internal_include_empty=False, dirs_only=False):
+    def get_dir_file_list(cls, fexts, root_dirs, recursion=1, exclude_empty=True, internal_include_empty=False, dirs_only=False, info=None):
         if not dirs_only:
             dir_marker = "> "
         else:
@@ -394,7 +408,7 @@ class zynthian_engine(zynthian_basic_engine):
         for i, rd in enumerate(root_dirs):
             root_dirs[i] = ("SD> " + rd[0], rd[1])
         # Add external storage to root_dirs
-        for exd in zynthian_gui_config.get_external_storage_dirs(cls.ex_data_dir):
+        for exd in zynconf.get_external_storage_dirs(cls.ex_data_dir):
             if not os.path.isdir(exd):
                 continue
             if not exclude_empty or cls.find_some_preset_file(exd, fexts, recursion + 1):
@@ -413,11 +427,14 @@ class zynthian_engine(zynthian_basic_engine):
                 dpath = walk[0] + "/" + dir
                 if (not exclude_empty or internal_include_empty) or cls.find_some_preset_file(dpath, fexts, recursion):
                     title = dir_marker + dir
-                    sres.append([dpath, None, title, None, dir])
+                    row = [dpath, None, title, None, dir]
+                    if info:
+                        row.append(info[0])
+                    sres.append(row)
 
             # Add files in root dir
             if not dirs_only:
-                sres += cls.get_filelist(root_dir[1], fexts)
+                sres += cls.get_filelist(root_dir[1], fexts, info=info)
 
             if len(sres):
                 res.append([None, None, root_dir[0], None, None])
@@ -441,8 +458,7 @@ class zynthian_engine(zynthian_basic_engine):
             zynautoconnect.remove_sidechain_ports(processor.jackname)
             processor.jackname = None
         except Exception as e:
-            logging.error(
-                f"Processor {processor.get_name()} not found in engine's processors list => {e}")
+            logging.error(f"Processor {processor.get_name()} not found in engine's processors list => {e}")
 
     def get_free_parts(self):
         free_parts = list(range(0, 16))
@@ -633,9 +649,9 @@ class zynthian_engine(zynthian_basic_engine):
             for symbol in list(processor.controllers_dict):
                 zctrl = processor.controllers_dict[symbol]
                 if symbol in symbols:
-                    zctrl.reset(self, symbol)
+                    zctrl.reset(self, symbol, full=False)
                 else:
-                    self.state_manager.chain_manager.remove_midi_learn_from_zctrl(zctrl)
+                    self.state_manager.chain_manager.remove_midi_learn_from_zctrl(zctrl, chain=True, abs=True, zynstep=True)
                     del processor.controllers_dict[symbol]
             # Regenerate / update controller dictionary
             for ctrl in self._ctrls:
@@ -649,13 +665,13 @@ class zynthian_engine(zynthian_basic_engine):
                     zctrl = zynthian_controller(self, ctrl[0], options)
                     processor.controllers_dict[zctrl.symbol] = zctrl
                     if zctrl.midi_cc is not None and processor.midi_autolearn and zctrl.midi_autolearn:
-                        self.state_manager.chain_manager.add_midi_learn(zctrl.midi_chan, zctrl.midi_cc, zctrl)
+                        self.state_manager.chain_manager.add_midi_learn(None, zctrl.midi_cc, zctrl)
 
         return processor.controllers_dict
 
     def get_ctrl_screen_name(self, gname, i):
         if i > 0:
-            gname = "{}#{}".format(gname, i)
+            gname = "{} {}".format(gname, i)
         return gname
 
     def generate_ctrl_screens(self, zctrl_dict):
@@ -673,10 +689,10 @@ class zynthian_engine(zynthian_basic_engine):
                 if zctrl.group_name:
                     zctrl_group[gsymbol] = [zctrl.group_name, {}]
                 else:
-                    zctrl_group[gsymbol] = [zctrl.group_symbol, {}]
+                    zctrl_group[gsymbol] = [gsymbol, {}]
             zctrl_group[gsymbol][1][symbol] = zctrl
         if None in zctrl_group:
-            zctrl_group[None][0] = "Ctrls"
+            zctrl_group[None][0] = "Params"
 
         for gsymbol, gdata in zctrl_group.items():
             ctrl_set = []
@@ -692,7 +708,7 @@ class zynthian_engine(zynthian_basic_engine):
                     # logging.debug("CTRL {}".format(symbol))
                     ctrl_set.append(symbol)
                     if len(ctrl_set) >= 4:
-                        # logging.debug("ADDING CONTROLLER SCREEN {}".format(self.get_ctrl_screen_name(gname,c)))
+                        #logging.debug("ADDING CONTROLLER SCREEN {}".format(self.get_ctrl_screen_name(gname,c)))
                         self._ctrl_screens.append([self.get_ctrl_screen_name(gname, c), ctrl_set])
                         ctrl_set = []
                         c = c + 1

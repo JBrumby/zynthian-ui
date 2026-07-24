@@ -47,18 +47,28 @@ class zynthian_gui_option(zynthian_gui_selector_info):
         self.close_on_select = True
         super().__init__("Menu")
 
-    def config(self, title, options, cb_select, close_on_select=True, click_type=False, index=0):
-        self.title = title
+    def config(self, title, options, cb_select, close_on_select=True, click_type=False, index=None):
+        reset_index = False
+        self.tts_title = title
+        if title != self.title:
+            self.title = title
+            reset_index = True
         if callable(options):
             self.options_cb = options
+            reset_index = True
             self.options = None
         else:
             self.options_cb = None
+            if len(options) != len(self.options):
+                reset_index = True
             self.options = options
         self.cb_select = cb_select
         self.close_on_select = close_on_select
         self.click_type = click_type
-        if index is not None:
+        if index is None:
+            if reset_index:
+                self.index = 0
+        else:
             self.index = index
 
     def config_file_list(self, title, dpaths, fpat, cb_select, close_on_select=True, click_type=False):
@@ -85,8 +95,7 @@ class zynthian_gui_option(zynthian_gui_selector_info):
                         if os.path.isfile(fpath):
                             self.options[fbase] = fpath
                 except Exception as err:
-                    logging.warning(
-                        "Can't get file list for {}/{}: {}".format(dpath, fpat, err))
+                    logging.warning("Can't get file list for {}/{}: {}".format(dpath, fpat, err))
 
     def fill_list(self):
         i = 0
@@ -95,7 +104,7 @@ class zynthian_gui_option(zynthian_gui_selector_info):
             self.options = self.options_cb()
         for k, v in self.options.items():
             if isinstance(v, list):
-                self.list_data.append((v[0], i, k, v[1]))
+                self.list_data.append((v[0], i, k, *v[1:]))
             else:
                 self.list_data.append((v, i, k))
             i += 1
@@ -114,5 +123,8 @@ class zynthian_gui_option(zynthian_gui_selector_info):
 
     def set_select_path(self):
         self.select_path.set(self.title)
+
+    def topbar_short_touch_action(self):
+        self.zyngui.back_screen()
 
 # ------------------------------------------------------------------------------

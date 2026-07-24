@@ -4,7 +4,7 @@
 #
 # zynthian processor
 #
-# Copyright (C) 2015-2023 Fernando Moyano <jofemodo@zynthian.org>
+# Copyright (C) 2015-2026 Fernando Moyano <jofemodo@zynthian.org>
 # Brian Walton <riban@zynthian.org>
 #
 # *****************************************************************************
@@ -24,13 +24,14 @@
 # *****************************************************************************
 
 import os
+import re
 import copy
 import logging
 import traceback
 
 # Zynthian specific modules
 from zyncoder.zyncore import lib_zyncore
-
+from zyngine.zynthian_signal_manager import *
 
 class zynthian_processor:
 
@@ -91,10 +92,12 @@ class zynthian_processor:
         self.preload_info = None
 
         self.controllers_dict = {}  # Map of zctrls indexed by symbol
+        self.bypass_zctrl = None    # Bypass zctrl, if any
         self.ctrl_screens_dict = {}
         self.current_screen_index = -1
         self.auto_save_bank = False
         self.midi_autolearn = True  # When true, auto-learn MIDI-CC based controllers
+        self.set_state_flag = False
 
     def get_jackname(self, engine=False):
         """ Get the jackname for the processor's engine
@@ -114,7 +117,8 @@ class zynthian_processor:
         """Set engine that this processor uses"""
 
         self.engine = engine
-        self.engine.add_processor(self)
+        if engine:
+            self.engine.add_processor(self)
 
     def get_name(self):
         """Get name of processor"""
@@ -141,6 +145,10 @@ class zynthian_processor:
         """Get ID of the chain to which the processor belongs, if any"""
 
         return self.chain_id
+
+    def reset(self):
+        for zctrl in self.controllers_dict.values():
+            zctrl.reset_value()
 
     # ---------------------------------------------------------------------------
     # MIDI autolearn CC controllers
@@ -322,7 +330,7 @@ class zynthian_processor:
         elif self.bank_info:
             for preset in self.engine.get_preset_list(self.bank_info, self):
                 if self.engine.is_preset_fav(preset):
-                    preset[2] = "❤" + preset[2]
+                    preset[2] = "❤ " + preset[2]
                 preset_list.append(preset)
         else:
             return
@@ -336,7 +344,6 @@ class zynthian_processor:
         self.preset_index = 0
         self.preset_name = None
         self.preset_info = None
-
 
     def set_preset(self, preset_index, set_engine=True, force_set_engine=True):
         """Set the processor's engine preset
@@ -364,7 +371,7 @@ class zynthian_processor:
 
         # Remove favorite marker char
         if preset_name[0] == '❤':
-            preset_name = preset_name[1:]
+            preset_name = preset_name[2:]
 
         # Check if preset is in favorites pseudo-bank and set real bank if needed
         if preset_id in self.engine.preset_favs:
@@ -416,12 +423,12 @@ class zynthian_processor:
         TODO:Optimize search!!
         """
         if preset_name[0] == '❤':
-            preset_name = preset_name[1:]
+            preset_name = preset_name[2:]
         for i in range(len(self.preset_list)):
             name_i = self.preset_list[i][2]
             try:
                 if name_i[0] == '❤':
-                    name_i = name_i[1:]
+                    name_i = name_i[2:]
                 if preset_name == name_i:
                     return self.set_preset(i, set_engine, force_set_engine)
             except:
@@ -572,9 +579,21 @@ class zynthian_processor:
             self.engine.get_controllers_dict(self, params)
         else:
             self.engine.get_controllers_dict(self)
+
+        # Set bypass zctrl
+        try:
+            self.bypass_zctrl = self.engine.bypass_zctrl
+        except:
+            self.bypass_zctrl = None
+            # Take first bypass zctrl => It shouldn't be more than one!!'
+            for zctrl in self.controllers_dict.values():
+                if zctrl.is_bypass:
+                    self.bypass_zctrl = zctrl
+                    break
+
         self.init_ctrl_screens()
 
-    def init_ctrl_screens(self):
+    def init_ctrl_screens(self, force_refresh=False):
         """Create controller screens from zynthian controller keys
 
         TODO: This should be in UI
@@ -591,6 +610,10 @@ class zynthian_processor:
                 self.current_screen_index = 0
         else:
             self.current_screen_index = -1
+        if force_refresh:
+            zynsigman.send(zynsigman.S_PROCESSOR,
+                           zynsigman.SS_PROCESSOR_CTRL_SCREENS,
+                           proc=self)
 
     def get_ctrl_screens(self):
         """Get processor controller screens
@@ -612,7 +635,10 @@ class zynthian_processor:
         try:
             return self.ctrl_screens_dict[key]
         except:
-            return None
+            keys = list(self.ctrl_screens_dict)
+            if keys:
+                return self.ctrl_screens_dict[keys[0]]
+        return []
 
     def get_current_screen_index(self):
         """Get index of last selected controller screen
@@ -672,19 +698,25 @@ class zynthian_processor:
                 mval = zctrl.get_ctrl_midi_val()
                 zctrl.send_midi_cc(mval)
                 # logging.debug("Sending MIDI CH{}#CC{}={} for {}".format(zctrl.midi_chan, zctrl.midi_cc, int(mval), k))
-            if zctrl.midi_feedback:
-                zctrl.send_midi_feedback(mval)
+
+            if zctrl.send_value_cb and callable(zctrl.send_value_cb):
+                try:
+                    zctrl.send_value_cb(zctrl)
+                except Exception as e:
+                    logging.warning(f"Can't send value feedback for {zctrl.symbol} => {e}")
 
     def send_ctrlfb_midi_cc(self):
-        """Send MIDI CC for all feeback controllers
+        """Send MIDI CC feedback for all configured controllers
 
         TODO: When is this required? Called by send_ctrl_midi_cc. Fluidsynth calls this during set_preset
         """
 
         for k, zctrl in self.controllers_dict.items():
-            if zctrl.midi_feedback:
-                zctrl.send_midi_feedback()
-                # logging.debug("Sending MIDI FB CH{}#CC{}={} for {}".format(zctrl.midi_feedback[0], zctrl.midi_feedback[1], int(zctrl.value), k))
+            if zctrl.send_value_cb and callable(zctrl.send_value_cb):
+                try:
+                    zctrl.send_value_cb(zctrl)
+                except Exception as e:
+                    logging.warning(f"Can't send value feedback for {zctrl.symbol} => {e}")
 
     def get_group_zctrls(self, group):
         zctrls = []
@@ -692,6 +724,81 @@ class zynthian_processor:
             if zctrl.group_symbol == group:
                 zctrls.append(zctrl)
         return zctrls
+
+    # ---------------------------------------------------------------------------
+    # Bypass management
+    # ---------------------------------------------------------------------------
+
+    # Return the processor's bypass zctrl, if any
+    def get_bypass_zctrl(self):
+        return self.bypass_zctrl
+
+    # Return True if the processor is bypassed
+    def is_bypassed(self):
+        if self.bypass_zctrl:
+            if self.bypass_zctrl.bypass_value:
+                return bool(self.bypass_zctrl.value)
+            else:
+                return not bool(self.bypass_zctrl.value)
+        return False
+
+    # Set the bypass
+    def set_bypass(self, bypass):
+        if self.bypass_zctrl:
+            if bypass:
+                self.bypass_zctrl.set_value(self.bypass_zctrl.bypass_value)
+            else:
+                self.bypass_zctrl.set_value(int(not self.bypass_zctrl.bypass_value))
+
+    def toggle_bypass(self):
+        self.set_bypass(not self.is_bypassed())
+
+    # ---------------------------------------------------------------------------
+    # Keymap management
+    # ---------------------------------------------------------------------------
+
+    # Returns a keymap name if the keymap can be generated
+    def get_keymap_name(self):
+        if self.engine.name.startswith("Jalv/"):
+            logging.debug(f"KEYMAP PLUGIN NAME => {self.engine.plugin_name}")
+            if self.engine.plugin_name == "Fabla":
+                return "Fabla - " + self.preset_name
+        elif self.engine.nickname in ("SF", "LS") and self.engine.keymap:
+            return "SFZ - " + self.preset_name
+        return None
+
+    # Returns keymap if possible
+    def get_keymap(self):
+        if self.engine.name.startswith("Jalv/"):
+            if self.engine.plugin_name == "Fabla":
+                return self.get_keymap_fabla()
+        elif self.engine.nickname in ("SF", "LS") and self.engine.keymap:
+            return self.engine.keymap
+        return None
+
+    def get_keymap_fabla(self):
+        keymap = []
+        base_note = int(self.controllers_dict[f"base_note"].get_value())
+        for i in range(64):
+            try:
+                fpath = self.controllers_dict[f"pad_fpath_{i + 1}"].get_value()
+            except:
+                continue
+            try:
+                name = os.path.splitext(os.path.basename(fpath))[0].strip()
+                if name:
+                    name = re.sub("^\d*_*", '', name)
+                    keymap.append({
+                        "note": base_note + i,
+                        "name": name,
+                        "colour": "white"
+                    })
+            except Exception as e:
+                logging.error(f"Can't add keymap element {i}, {fpath} => {e}")
+        return keymap
+
+    # QUESTION: Should we move here the code for generating keymaps (midnam files & scales) from pattern editor?
+    # It makes sense ...
 
     # ----------------------------------------------------------------------------
     # MIDI processing
@@ -761,7 +868,14 @@ class zynthian_processor:
         """Configure processor from state model dictionary
 
         state : Processor state
+        returns : list of cc learn config: [chain, chan, cc, zctrl]
         """
+
+        self.set_state_flag = True
+        try:
+            self.engine.set_state_pre(self)
+        except:
+            pass
 
         if "bank_subdir_info" in state and state["bank_subdir_info"]:
             self.bank_subdir_info = state["bank_subdir_info"]
@@ -796,7 +910,7 @@ class zynthian_processor:
         # Set controller values
         if "controllers" in state:
             # Flag controllers to avoid collisions from preset feedback values
-            # It should be do it before setting the preset, but i need to know if preset has been changed,
+            # It should be done before setting the preset, but i need to know if preset has been changed,
             # so it's done after, but ASAP, to avoid tallies from setting preset arrive before
             if res:
                 for symbol, ctrl_state in state["controllers"].items():
@@ -811,14 +925,38 @@ class zynthian_processor:
             for symbol, ctrl_state in state["controllers"].items():
                 try:
                     zctrl = self.controllers_dict[symbol]
+                    reconfig = False
                     if "value" in ctrl_state:
                         zctrl.set_value(ctrl_state["value"], True)
                     if "midi_cc_momentary_switch" in ctrl_state:
                         zctrl.midi_cc_momentary_switch = ctrl_state['midi_cc_momentary_switch']
                     if "midi_cc_debounce" in ctrl_state:
                         zctrl.midi_cc_debounce = ctrl_state['midi_cc_debounce']
+                    if "midi_cc_val1" in ctrl_state:
+                        if zctrl.midi_cc_val1 != ctrl_state['midi_cc_val1']:
+                            zctrl.midi_cc_val1 = ctrl_state['midi_cc_val1']
+                            reconfig = True
+                    elif zctrl.midi_cc_val1 != zctrl.value_min:
+                        zctrl.midi_cc_val1 = zctrl.value_min
+                        reconfig = True
+                    if "midi_cc_val2" in ctrl_state:
+                        if zctrl.midi_cc_val2 != ctrl_state['midi_cc_val2']:
+                            zctrl.midi_cc_val2 = ctrl_state['midi_cc_val2']
+                            reconfig = True
+                    elif zctrl.midi_cc_val2 != zctrl.value_max:
+                        zctrl.midi_cc_val2 = zctrl.value_max
+                        reconfig = True
+                    if reconfig:
+                        zctrl._configure()
                 except Exception as e:
                     logging.warning(f"Invalid controller for processor {self.get_basepath()}: {e}")
+
+        self.set_state_flag = False
+        try:
+            self.engine.set_state_post(self)
+        except:
+            pass
+
 
     def restore_state_legacy(self, state):
         """Restore legacy states from state
@@ -851,10 +989,7 @@ class zynthian_processor:
     def get_basepath(self):
         """Get base path string"""
 
-        if self.engine:
-            path = self.engine.get_path(self)
-        else:
-            path = "NONE"
+        path = self.name
         if isinstance(self.midi_chan, int):
             if 0 <= self.midi_chan < 16:
                 path = f"{self.midi_chan + 1}#{path}"

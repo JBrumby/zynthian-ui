@@ -4,7 +4,7 @@
 #
 # zynthian state manager
 #
-# Copyright (C) 2015-2024 Fernando Moyano <jofemodo@zynthian.org>
+# Copyright (C) 2015-2026 Fernando Moyano <jofemodo@zynthian.org>
 #                         Brian Walton <riban@zynthian.org>
 #
 # ****************************************************************************
@@ -23,7 +23,6 @@
 #
 # ****************************************************************************
 
-import base64
 import ctypes
 import logging
 import traceback
@@ -46,42 +45,35 @@ from zynlibs.zynseq import zynseq
 # Python wrapper for zynsmf (ensures initialised and wraps load() function)
 from zynlibs.zynsmf import zynsmf
 from zynlibs.zynsmf.zynsmf import libsmf  # Direct access to shared library
+from zynlibs.zynmixer import zynmixer
 
 from zyngine.zynthian_chain_manager import *
-from zyngine.zynthian_processor import zynthian_processor
-from zyngine.zynthian_audio_recorder import zynthian_audio_recorder
+
 from zyngine.zynthian_signal_manager import zynsigman
+from zyngine.zynthian_ctrldev_manager import zynthian_ctrldev_manager
+from zyngine.zynthian_audio_recorder import zynthian_audio_recorder
 from zyngine.zynthian_legacy_snapshot import zynthian_legacy_snapshot, SNAPSHOT_SCHEMA_VERSION
-from zyngine import zynthian_engine_audio_mixer
 from zyngine import zynthian_midi_filter
 
 from zyngui import zynthian_gui_config
-from zyngine.zynthian_ctrldev_manager import zynthian_ctrldev_manager
 
 # ----------------------------------------------------------------------------
 # Zynthian State Manager Class
 # ----------------------------------------------------------------------------
 
-capture_dir_sdc = os.environ.get('ZYNTHIAN_MY_DATA_DIR', "/zynthian/zynthian-my-data") + "/capture"
-ex_data_dir = os.environ.get('ZYNTHIAN_EX_DATA_DIR', "/media/root")
 
+zynthian_dir = os.environ.get('ZYNTHIAN_DIR', "/zynthian")
+ui_dir = os.environ.get('ZYNTHIAN_UI_DIR', "/zynthian/zynthian-ui")
+my_data_dir = os.environ.get('ZYNTHIAN_MY_DATA_DIR', "/zynthian/zynthian-my-data")
+ex_data_dir = os.environ.get('ZYNTHIAN_EX_DATA_DIR', "/media/root")
+capture_dir_sdc = my_data_dir + "/capture"
+
+MAIN_MIXBUS_ID = -1
+ALSA_ID = -2
+AUDIO_PLAYER_ID = -3
+TEMPO_ID = -4
 
 class zynthian_state_manager:
-
-    # Subsignals are defined inside each module. Here we define state manager subsignals:
-    SS_LOAD_SNAPSHOT = 1
-    SS_MIDI_PLAYER_STATE = 2
-    SS_MIDI_RECORDER_STATE = 3
-    SS_LOAD_ZS3 = 4
-    SS_SAVE_ZS3 = 5
-    SS_ALL_NOTES_OFF = 6
-
-    # Subsignals from other modules. Just to simplify access.
-    # From S_AUDIO_PLAYER
-    SS_AUDIO_PLAYER_STATE = 1
-    # From S_AUDIO_RECORDER
-    SS_AUDIO_RECORDER_STATE = 1
-    SS_AUDIO_RECORDER_ARM = 2
 
     def __init__(self):
         """ Create an instance of a state manager
@@ -97,6 +89,7 @@ class zynthian_state_manager:
         self.busy_warning = None
         self.busy_success = None
         self.busy_details = None
+        self.busy_ts = None
         self.start_busy("zynthian_state_manager")
 
         self.snapshot_dir = os.environ.get('ZYNTHIAN_MY_DATA_DIR', "/zynthian/zynthian-my-data") + "/snapshots"
@@ -116,7 +109,7 @@ class zynthian_state_manager:
         self.last_event_ts = monotonic()
 
         # Status
-        self.status_xrun = False
+        self.status_xrun = 0
         self.status_undervoltage = False
         self.overtemp_warning = 75  # Temperature limit before warning overtemperature
         self.status_overtemp = False
@@ -126,12 +119,13 @@ class zynthian_state_manager:
         self.status_midi_player = False
         self.last_midi_file = None
         self.status_midi = False
+        self.status_midi_ch = 0 # 16-bit MIDI activity indicator, 1-bit per MIDI
         self.status_midi_clock = False
         self.update_available = False  # True when updates available from repositories
         self.checking_for_updates = False  # True whilst checking for updates
 
         self.midi_filter_script = None
-        self.midi_learn_state = False
+        self.midi_learn_state = False # False for disabled, None for learning global, chain id for learning chain
         # When ZS3 Program Change MIDI learning is enabled, the name used for creating new ZS3, empty string for auto-generating a name. None when disabled.
         self.midi_learn_pc = None
         self.midi_learn_zctrl = None   # zctrl currently being learned
@@ -145,19 +139,16 @@ class zynthian_state_manager:
         self.hwmon_thermal_file = None
         self.hwmon_undervolt_file = None
 
-        self.zynmixer = zynthian_engine_audio_mixer.zynmixer()
+        self.zynmixer_chan = zynmixer.ZynMixer() # zynmixer used for channel strips
+        self.zynmixer_bus = zynmixer.ZynMixer(True) # zynmixer used for buses, e.g main, fx return, etc.
         self.chain_manager = zynthian_chain_manager(self)
         self.reset_zs3()
 
-        self.alsa_mixer_processor = zynthian_processor("MX", {
-            "NAME": "Mixer", "TITLE": "ALSA Mixer", "TYPE": "MIXER",
-            "CAT": None, "ENGINE": zynthian_engine_alsa_mixer, "ENABLED": True
-        })
-        self.alsa_mixer_processor.engine = zynthian_engine_alsa_mixer(self, self.alsa_mixer_processor)
-        self.alsa_mixer_processor.refresh_controllers()
+        self.zynseq = zynseq.zynseq(self)
+        self.alsa_mixer_processor = self.chain_manager.add_processor(None, "MX", None, ALSA_ID)
+        self.tempo_processor = self.chain_manager.add_processor(None, "TP", None, TEMPO_ID) #TODO: Use zynseq engine directly
 
         self.audio_recorder = zynthian_audio_recorder(self)
-        self.zynseq = zynseq.zynseq(self)
         self.ctrldev_manager = None
         self.audio_player = None
         self.aubio_in = [1, 2]  # List of aubio inputs
@@ -185,6 +176,7 @@ class zynthian_state_manager:
         self.slow_thread = None
         self.fast_thread = None
         self.start()
+        self.set_power_save_mode(False)
 
         self.end_busy("zynthian_state_manager")
 
@@ -214,7 +206,7 @@ class zynthian_state_manager:
                 logging.debug(f"Opened undervoltage sensor '{result[0]}'")
             except:
                 self.hwmon_undervolt_file = None
-                logging.error("Can't access undervoltage sensor.")
+                logging.warning("Can't access undervoltage sensor.")
 
         # RBPi native sensors monitoring interface
         if self.hwmon_thermal_file is None or self.hwmon_undervolt_file is None:
@@ -226,14 +218,13 @@ class zynthian_state_manager:
         # Start VNC as configured
         self.default_vncserver()
 
+        self.chain_manager.add_chain(0)
         self.ctrldev_manager = zynthian_ctrldev_manager(self)
         zynautoconnect.start(self)
         self.jack_period = self.get_jackd_blocksize() / self.get_jackd_samplerate()
-        self.zynmixer.reset_state()
+        self.main_mixbus_proc = self.chain_manager.add_processor(0, "MR", 0, MAIN_MIXBUS_ID)
         self.reload_midi_config()
         self.create_audio_player()
-        self.chain_manager.add_chain(0)
-
         self.exit_flag = False
         self.slow_thread = Thread(target=self.slow_thread_task)
         self.slow_thread.name = "Status Manager Slow"
@@ -245,7 +236,7 @@ class zynthian_state_manager:
         self.fast_thread.daemon = True  # thread dies with the program
         self.fast_thread.start()
 
-        zynsigman.register(zynsigman.S_AUDIO_PLAYER, self.SS_AUDIO_PLAYER_STATE, self.cb_status_audio_player)
+        zynsigman.register(zynsigman.S_AUDIO_PLAYER, zynsigman.SS_AUDIO_PLAYER_STATE, self.cb_status_audio_player)
 
         self.end_busy("start state")
 
@@ -254,7 +245,7 @@ class zynthian_state_manager:
 
         self.start_busy("stop state")
 
-        zynsigman.unregister(zynsigman.S_AUDIO_PLAYER, self.SS_AUDIO_PLAYER_STATE, self.cb_status_audio_player)
+        zynsigman.unregister(zynsigman.S_AUDIO_PLAYER, zynsigman.SS_AUDIO_PLAYER_STATE, self.cb_status_audio_player)
 
         self.exit_flag = True
         if self.fast_thread and self.fast_thread.is_alive():
@@ -269,7 +260,7 @@ class zynthian_state_manager:
         zynautoconnect.pause()
         self.chain_manager.remove_all_chains(True)
         self.reset_zs3()
-        self.zynseq.load("")
+        self.zynseq.reset()
         self.ctrldev_manager.unload_all_drivers()
         self.destroy_audio_player()
         zynautoconnect.stop()
@@ -302,21 +293,23 @@ class zynthian_state_manager:
         sequences : True for cleaning zynseq state (sequences)
         """
 
-        self.zynmixer.set_mute(self.zynmixer.MAX_NUM_CHANNELS - 1, 1)
+        self.mute()
         # self.zynseq.transport_stop("ALL")
         self.zynseq.libseq.stop()
         if zynseq:
-            self.zynseq.load("")
+            self.zynseq.reset()
         if chains:
             zynautoconnect.pause()
             self.chain_manager.remove_all_chains(True)
             self.reset_zs3()
-            self.zynmixer.reset_state()
+            self.zynmixer_chan.reset()
+            self.zynmixer_bus.reset()
             self.reload_midi_config()
             zynautoconnect.request_midi_connect(True)
             zynautoconnect.request_audio_connect(True)
             zynautoconnect.resume()
-        self.zynmixer.set_mute(self.zynmixer.MAX_NUM_CHANNELS - 1, 0)
+            self.chain_manager.chains[0]
+        self.mute(False)
 
     def clean_all(self):
         """Remove ALL Chains & Sequences."""
@@ -343,12 +336,13 @@ class zynthian_state_manager:
         self.end_busy("clean sequences")
         self.busy.clear()  # Sometimes it's needed, why??
 
+    def mute(self, mute=True, wait=0.01):
+        self.main_mixbus_proc.controllers_dict["mute"].set_value(mute)
+        sleep(wait)
+
     # -------------------------------------------------------------------------
     # Internal parameters and core limits
     # -------------------------------------------------------------------------
-
-    def get_max_num_mixer_chans(self):
-        return MAX_NUM_MIXER_CHANS
 
     def get_num_zmop_chains(self):
         return NUM_ZMOP_CHAINS
@@ -377,15 +371,24 @@ class zynthian_state_manager:
     def get_zmip_ctrl_index(self):
         return ZMIP_CTRL_INDEX
 
+    def get_zmop_mod_index(self):
+        return ZMOP_MOD_INDEX
+
+    def get_zmop_step_index(self):
+        return ZMOP_STEP_INDEX
+
     # -------------------------------------------------------------------------
     # Busy state management
     # -------------------------------------------------------------------------
 
-    def start_busy(self, clid, message=None, details=None):
+    def start_busy(self, clid, message=None, details=None, tts=True):
         """Add client to list of busy clients
         clid : Client id
         """
 
+        if not self.busy:
+            self.busy_ts = monotonic()
+            zynsigman.send(zynsigman.S_STATE_MAN, zynsigman.SS_BUSY, state=True, tts=tts)
         self.busy.add(clid)
         if message:
             self.busy_message = message
@@ -409,6 +412,7 @@ class zynthian_state_manager:
             self.busy_warning = None
             self.busy_success = None
             self.busy_details = None
+            zynsigman.send(zynsigman.S_STATE_MAN, zynsigman.SS_BUSY, state=False)
 
         # logging.debug(f"End busy for {clid}. Remaining clients: {self.busy}")
 
@@ -419,6 +423,7 @@ class zynthian_state_manager:
         self.busy_warning = None
         self.busy_success = None
         self.busy_details = None
+        zynsigman.send(zynsigman.S_STATE_MAN, zynsigman.SS_BUSY, state=False)
 
     def is_busy(self, client=None):
         """Check if clients are busy
@@ -600,8 +605,8 @@ class zynthian_state_manager:
                             logging.error(e)
 
                     else:
-                        self.status_overtemp = True
-                        self.status_undervoltage = True
+                        self.status_overtemp = False
+                        self.status_undervoltage = False
 
                 else:
                     status_counter += 1
@@ -613,28 +618,28 @@ class zynthian_state_manager:
                     self.status_midi_player = status_midi_player
                     if status_midi_player == 0:
                         self.zynseq.transport_stop("zynsmf")
-
-                    zynsigman.send(zynsigman.S_STATE_MAN, self.SS_MIDI_PLAYER_STATE, state=status_midi_player)
+                    zynsigman.send(zynsigman.S_STATE_MAN, zynsigman.SS_MIDI_PLAYER_STATE, state=status_midi_player)
 
                 # MIDI Recorder
                 # TODO: Add callback from MIDI recorder to avoid polling (and regular access to c-lib)
                 status_midi_recorder = libsmf.isRecording()
                 if self.status_midi_recorder != status_midi_recorder:
                     self.status_midi_recorder = status_midi_recorder
-                    zynsigman.send(zynsigman.S_STATE_MAN, self.SS_MIDI_RECORDER_STATE, state=status_midi_recorder)
+                    zynsigman.send(zynsigman.S_STATE_MAN, zynsigman.SS_MIDI_RECORDER_STATE, state=status_midi_recorder)
 
                 # Sequencer Status => It must be improved using callbacks
                 self.zynseq.update_state()
 
                 # Clean some status flags
                 if xruns_status:
-                    self.status_xrun = False
-                    xruns_status = False
+                    self.status_xrun = 0
+                    xruns_status = 0
                 if self.status_xrun:
-                    xruns_status = True
+                    xruns_status = self.status_xrun
 
                 if midi_status:
                     self.status_midi = False
+                    self.status_midi_ch = 0
                     midi_status = False
                 if self.status_midi:
                     midi_status = True
@@ -674,6 +679,8 @@ class zynthian_state_manager:
         while not self.exit_flag:
             # Process MIDI events
             self.zynmidi_read()
+            # Sequencer Progress => TODO Improved by callbacks?
+            self.zynseq.update_progress()
             sleep(0.01)
 
     def add_slow_update_callback(self, rate, cb):
@@ -806,8 +813,6 @@ class zynthian_state_manager:
                         else:
                             if self.midi_learn_zctrl:
                                 self.chain_manager.add_midi_learn(chan, ccnum, self.midi_learn_zctrl, izmip)
-                            else:
-                                self.zynmixer.midi_control_change(chan, ccnum, ccval)
                     # Master Note CUIA with ZynSwitch emulation
                     elif evtype == 0x8 or evtype == 0x9:
                         note = str(ev[1] & 0x7F)
@@ -839,7 +844,6 @@ class zynthian_state_manager:
                     if ccnum < 120:
                         if not self.midi_learn_zctrl:
                             self.chain_manager.midi_control_change(izmip, chan, ccnum, ccval)
-                            self.zynmixer.midi_control_change(chan, ccnum, ccval)
                             self.alsa_mixer_processor.midi_control_change(chan, ccnum, ccval)
                             self.audio_player.midi_control_change(chan, ccnum, ccval)
                         zynsigman.send_queued(zynsigman.S_MIDI, zynsigman.SS_MIDI_CC,
@@ -877,8 +881,7 @@ class zynthian_state_manager:
                                 chan = self.chain_manager.get_active_chain().midi_chan
                             send_signal = self.chain_manager.set_midi_prog_preset(chan, pgm)
                     if send_signal:
-                        zynsigman.send_queued(zynsigman.S_MIDI, zynsigman.SS_MIDI_PC,
-                                              izmip=izmip, chan=chan, num=pgm)
+                        zynsigman.send_queued(zynsigman.S_MIDI, zynsigman.SS_MIDI_PC, izmip=izmip, chan=chan, num=pgm)
 
                 # Note Off
                 elif evtype == 0x8:
@@ -896,6 +899,7 @@ class zynthian_state_manager:
 
                 # Flag MIDI event
                 self.status_midi = True
+                self.status_midi_ch |= (1 << chan)
                 self.last_event_flag = True
 
         except Exception as err:
@@ -908,12 +912,14 @@ class zynthian_state_manager:
     def power_save_check(self):
         if zynthian_gui_config.power_save_secs <= 0:
             return
-        if self.last_event_flag:
+        if self.last_event_flag or self.zynmixer_bus.dpm[0].a_hold > zynthian_gui_config.audio_power_threshold or self.zynmixer_bus.dpm[0].b_hold > zynthian_gui_config.audio_power_threshold:
             self.last_event_ts = monotonic()
             self.last_event_flag = False
             if self.power_save_mode:
                 self.set_power_save_mode(False)
-        elif not self.power_save_mode and (monotonic() - self.last_event_ts) > zynthian_gui_config.power_save_secs:
+        elif self.power_save_mode:
+            self.zynmixer_bus.update_dpm_states()
+        elif (monotonic() - self.last_event_ts) > zynthian_gui_config.power_save_secs:
             self.set_power_save_mode(True)
 
     def set_power_save_mode(self, psm=True):
@@ -921,10 +927,18 @@ class zynthian_state_manager:
         if psm:
             logging.info("Power Save Mode: ON")
             self.ctrldev_manager.sleep_on()
-            check_output("powersave_control.sh on", shell=True)
+            self.last_event_flag = False
+            self.last_event_ts = monotonic() - zynthian_gui_config.power_save_secs
+            try:
+                check_output("powersave_control.sh on", shell=True)
+            except Exception as e:
+                logging.error(e)
         else:
             logging.info("Power Save Mode: OFF")
-            check_output("powersave_control.sh off", shell=True)
+            try:
+                check_output("powersave_control.sh off", shell=True)
+            except Exception as e:
+                logging.error(e)
             self.ctrldev_manager.sleep_off()
 
     def set_event_flag(self):
@@ -937,6 +951,9 @@ class zynthian_state_manager:
     # Snapshot Save & Load
     # ----------------------------------------------------------------------------
 
+    def get_schema(self):
+        return SNAPSHOT_SCHEMA_VERSION
+
     def get_state(self):
         """Get a dictionary describing the full state model"""
 
@@ -948,7 +965,10 @@ class zynthian_state_manager:
             'midi_profile_state': self.get_midi_profile_state(),
             'chains': self.chain_manager.get_state(),
             'zs3': self.zs3,
-            'last_zs3_id': self.last_zs3_id
+            'last_zs3_id': self.last_zs3_id,
+            'gui': {
+                'pinned_chains': self.chain_manager.get_pinned_count()
+            }
         }
 
         engine_states = {}
@@ -959,28 +979,15 @@ class zynthian_state_manager:
         if engine_states:
             state["engine_config"] = engine_states
 
-        # Add ALSA-Mixer setting
-        if zynthian_gui_config.snapshot_mixer_settings and self.alsa_mixer_processor:
-            state['alsa_mixer'] = self.alsa_mixer_processor.get_state()
-
-        # Audio Recorder Armed
-        armed_state = []
-        for midi_chan in range(self.zynmixer.MAX_NUM_CHANNELS):
-            if self.audio_recorder.is_armed(midi_chan):
-                armed_state.append(midi_chan)
-        if armed_state:
-            state['audio_recorder_armed'] = armed_state
-
-        # Zynseq RIFF data
-        binary_riff_data = self.zynseq.get_riff_data()
-        b64_data = base64.b64encode(binary_riff_data)
-        state['zynseq_riff_b64'] = b64_data.decode('utf-8')
+        # zynseq json
+        self.zynseq.refresh_state()
+        state['zynseq'] = self.zynseq.state
 
         return state
 
     def export_chain(self, fpath, chain_id):
         """Save just a single chain to a snapshot file
-        
+
         fpath: Full filename and path
         chain_id: Chain to export
         """
@@ -1013,7 +1020,7 @@ class zynthian_state_manager:
                         except:
                             pass
 
-            for key in ["last_snapshot_fpath", "midi_profile_state", "engine_config", "audio_recorder_armed", "zynseq_riff_b64", "alsa_mixer", "zyngui"]:
+            for key in ["last_snapshot_fpath", "midi_profile_state", "zynseq"]:
                 try:
                     del state[key]
                 except:
@@ -1094,22 +1101,17 @@ class zynthian_state_manager:
             self.end_busy("load snapshot")
             return None
 
-        mute = self.zynmixer.get_mute(self.zynmixer.MAX_NUM_CHANNELS - 1)
+        mute = self.zynmixer_bus.get_mute(0)
         try:
             snapshot = JSONDecoder().decode(json)
             self.set_busy_details("fixing legacy snapshot")
             converter = zynthian_legacy_snapshot(self)
             state = converter.convert_state(snapshot)
 
-            if load_sequences and "zynseq_riff_b64" in state:
-                b64_bytes = state["zynseq_riff_b64"].encode("utf-8")
-                binary_riff_data = base64.decodebytes(b64_bytes)
-                self.zynseq.restore_riff_data(binary_riff_data)
-                self.zynseq.update_tempo()
-
+            # Load chains
             if load_chains:
                 # Mute output to avoid unwanted noises
-                self.zynmixer.set_mute(self.zynmixer.MAX_NUM_CHANNELS - 1, True)
+                self.mute(True)
 
                 zynautoconnect.pause()
                 if "chains" in state:
@@ -1120,7 +1122,7 @@ class zynthian_state_manager:
 
                     if merge:
                         # Remove elements that are not to be merged
-                        for key in ["last_snapshot_fpath", "last_zs3_id", "midi_profile_state", "audio_recorder_armed", "zynseq_riff_b64", "alsa_mixer", "zyngui"]:
+                        for key in ["last_snapshot_fpath", "last_zs3_id", "midi_profile_state", "zynseq"]:
                             try:
                                 del state[key]
                             except:
@@ -1128,7 +1130,6 @@ class zynthian_state_manager:
                         # Need to reassign chains and processor ids
                         chain_map = {}  # Map of new chain id indexed by old id
                         proc_map = {}   # Map of new processor id indexed by old id
-                        mixer_map = {}  # Map of new mixer chan idx indexed by old idx
                         # Don't import main chain
                         try:
                             del state["chains"]["0"]
@@ -1139,13 +1140,8 @@ class zynthian_state_manager:
                             if new_proc_id <= id:
                                 new_proc_id = id + 1
 
-                        mixer_chan = 0
                         for chain_id, chain_state in state["chains"].items():
                             # Fix mixer channel
-                            mixer_chan = self.chain_manager.get_next_free_mixer_chan(mixer_chan)
-                            mixer_map[int(chain_state["mixer_chan"])] = mixer_chan
-                            chain_state["mixer_chan"] = mixer_chan
-                            mixer_chan += 1
                             new_chain_id = 1
                             while new_chain_id in self.chain_manager.chains:
                                 new_chain_id += 1
@@ -1175,18 +1171,6 @@ class zynthian_state_manager:
                                         if str(ctrl_cfg[0]) in proc_map:
                                             ctrl_cfg[0] = proc_map[str(ctrl_cfg[0])]
                         state["zs3"]["zs3-0"]["chains"] = chains
-                        mixer_chans = {}
-                        for old_mixer_chan, new_mixer_chan in mixer_map.items():
-                            try:
-                                mixer_chans[f"chan_{new_mixer_chan:02d}"] = state["zs3"]["zs3-0"]["mixer"][f"chan_{old_mixer_chan:02d}"]
-                            except:
-                                pass
-                        state["zs3"]["zs3-0"]["mixer"] = mixer_chans
-                        # We don't want to merge MIDI binding to mixer
-                        try:
-                            del state["zs3"]["zs3-0"]["mixer"]["midi_learn"]
-                        except:
-                            pass
                         # We don't want to merge MIDI capture
                         try:
                             del state["zs3"]["zs3-0"]["midi_capture"]
@@ -1197,6 +1181,14 @@ class zynthian_state_manager:
                 self.chain_manager.stop_unused_engines()
                 zynautoconnect.resume()
 
+            # Load Sequences after loading chains
+            if load_sequences and "zynseq" in state:
+                if not self.zynseq.set_state(state["zynseq"]):
+                    self.set_busy_warning("Invalid sequence data within snapshot")
+                    sleep(2)
+
+            # After loading sequiences, load initial state (ZS3-0)
+            if load_chains:
                 if "last_zs3_id" in state:
                     self.last_zs3_id = state["last_zs3_id"]
                 else:
@@ -1206,26 +1198,21 @@ class zynthian_state_manager:
                     self.zs3 = zs3
                 self.load_zs3(zs3["zs3-0"], autoconnect=False)
                 try:
-                    mute |= self.zs3["zs3-0"]["mixer"]["chan_16"]["mute"]
+                    mute |= state['zs3']['zs3-0']['processors'][MAIN_MIXBUS_ID]['controllers']['mute']["value"]
                 except:
                     pass
-
-                if "alsa_mixer" in state:
-                    self.alsa_mixer_processor.set_state(state["alsa_mixer"])
-
-                if "audio_recorder_armed" in state:
-                    for midi_chan in range(self.zynmixer.MAX_NUM_CHANNELS):
-                        if midi_chan in state["audio_recorder_armed"]:
-                            self.audio_recorder.arm(midi_chan)
-                        else:
-                            self.audio_recorder.unarm(midi_chan)
-
-                if "midi_profile_state" in state:
-                    self.set_midi_profile_state(state["midi_profile_state"])
 
                 # After loading initial state, enable midi autolearn in all processors
                 for proc in self.chain_manager.processors.values():
                     proc.set_midi_autolearn(True)
+
+                if "midi_profile_state" in state:
+                    self.set_midi_profile_state(state["midi_profile_state"])
+
+                # GUI
+                if "gui" in state:
+                    self.chain_manager.set_pinned(state["gui"].get("pinned_chains", 1))
+
 
             # Save last snapshot info and get snapshot's program number
             self.last_snapshot_count += 1
@@ -1251,10 +1238,10 @@ class zynthian_state_manager:
         zynautoconnect.request_audio_connect(True)
 
         # Restore mute state
-        self.zynmixer.set_mute(self.zynmixer.MAX_NUM_CHANNELS - 1, mute)
+        self.mute(mute, 0)
 
         # Signal snapshot loading
-        zynsigman.send_queued(zynsigman.S_STATE_MAN, self.SS_LOAD_SNAPSHOT)
+        zynsigman.send_queued(zynsigman.S_STATE_MAN, zynsigman.SS_LOAD_SNAPSHOT)
 
         self.end_busy("load snapshot")
         return state
@@ -1353,16 +1340,20 @@ class zynthian_state_manager:
     def set_zs3_title(self, zs3_id, title):
         self.zs3[zs3_id]["title"] = title
 
-    def toggle_zs3_chain_restore_flag(self, zs3_id, chain_id):
+    def toggle_zs3_restore_flag(self, zs3_id, type, id=None):
         zs3_state = self.zs3[zs3_id]
-        if chain_id == "mixer":
-            tstate = zs3_state["mixer"]
-        else:
-            tstate = zs3_state["chains"][chain_id]
+        if type == "midi_learn":
+            zs3_state["restore_midi_learn"] = not zs3_state.get("restore_midi_learn", False)
+            return
+        try:
+            tstate = zs3_state[type][int(id)]
+        except:
+            return
         try:
             tstate["restore"] = not tstate["restore"]
         except:
             tstate["restore"] = False
+
 
     def load_zs3(self, zs3_id, autoconnect=True):
         """Restore a ZS3
@@ -1371,6 +1362,7 @@ class zynthian_state_manager:
         Returns : True on success
         """
 
+        active_phrase = 0
         if isinstance(zs3_id, str):
             # Try loading exact match
             try:
@@ -1394,33 +1386,23 @@ class zynthian_state_manager:
 
         restored_chains = []
         restored_cc_mapping = []
+        restore_midi_learn = zs3_id == "zs3-0" or zs3_state.get("restore_midi_learn", False)
         mute_pause = False
         if "chains" in zs3_state:
             self.set_busy_details("restoring chains state")
             for chain_id, chain_state in zs3_state["chains"].items():
                 chain_id = int(chain_id)
-
                 try:
                     restore_flag = chain_state["restore"]
                 except:
                     restore_flag = True
-
                 if not restore_flag:
                     continue
-
                 chain = self.chain_manager.get_chain(chain_id)
                 if chain:
                     restored_chains.append(chain_id)
                 else:
                     continue
-
-                try:
-                    if zs3_state["mixer"][f"chan_{chain.mixer_chan:02}"]["mute"]:
-                        # Avoid subsequent config changes from being heard on muted chains
-                        self.zynmixer.set_mute(chain.mixer_chan, 1)
-                        mute_pause = True
-                except:
-                    pass
 
                 if "midi_chan" in chain_state:
                     if chain.midi_chan is not None and chain.midi_chan != chain_state['midi_chan']:
@@ -1443,12 +1425,11 @@ class zynthian_state_manager:
                         lib_zyncore.zmop_set_transpose_semitone(chain.zmop_index, chain_state["transpose_semitone"])
                     else:
                         lib_zyncore.zmop_set_transpose_semitone(chain.zmop_index, 0)
+
                 if "midi_in" in chain_state:
                     chain.midi_in = chain_state["midi_in"]
                 if "midi_out" in chain_state:
                     chain.midi_out = chain_state["midi_out"]
-                if "midi_thru" in chain_state:
-                    chain.midi_thru = chain_state["midi_thru"]
                 if "audio_in" in chain_state:
                     chain.audio_in = chain_state["audio_in"]
                 chain.audio_out = []
@@ -1461,15 +1442,28 @@ class zynthian_state_manager:
                             chain.audio_out.append("^system:playback_1$|^system:playback_2$")
                         elif out not in chain.audio_out:
                             chain.audio_out.append(out)
-
-                if "audio_thru" in chain_state:
-                    chain.audio_thru = chain_state["audio_thru"]
                 chain.rebuild_graph()
-                if "midi_cc" in chain_state:
-                    for cc, cfg in chain_state["midi_cc"].items():
-                        for proc_id, symbol in cfg:
-                            if proc_id in self.chain_manager.processors:
-                                restored_cc_mapping.append((proc_id, int(cc), symbol))
+
+                if restore_midi_learn:
+                    # Current (correct) chain MIDI-learn state
+                    self.chain_manager.clean_midi_learn(chain_id)
+                    if "midi_learn" in chain_state:
+                        for low_key, cfg in chain_state["midi_learn"].items():
+                            low_key = int(low_key)
+                            midi_chan = (low_key >> 8) & 0xff
+                            midi_cc = low_key & 0x7f
+                            for proc_id, symbol in cfg:
+                                if proc_id in self.chain_manager.processors:
+                                    restored_cc_mapping.append((proc_id, symbol, midi_chan, midi_cc))
+                    # Legacy (wrong) chain MIDI-learn state
+                    elif "midi_cc" in chain_state:
+                        for midi_cc, cfg in chain_state["midi_cc"].items():
+                            midi_chan = 0xff
+                            midi_cc = int(midi_cc) & 0x7f
+                            for proc_id, symbol in cfg:
+                                if proc_id in self.chain_manager.processors:
+                                    restored_cc_mapping.append((proc_id, symbol, midi_chan, midi_cc))
+
         if mute_pause:
             # Wait for soft mutes to apply before changing settings
             sleep(self.jack_period)
@@ -1477,8 +1471,15 @@ class zynthian_state_manager:
         if "processors" in zs3_state:
             for proc_id, proc_state in zs3_state["processors"].items():
                 try:
-                    processor = self.chain_manager.processors[int(proc_id)]
-                    if processor.chain_id in restored_chains:
+                    restore_flag = proc_state["restore"]
+                except:
+                    restore_flag = True
+                if not restore_flag:
+                    continue
+                try:
+                    id = int(proc_id)
+                    processor = self.chain_manager.processors[id]
+                    if id < 0 or processor.chain_id in restored_chains:
                         self.set_busy_details(f"restoring {processor.get_basepath()} state")
                         processor.set_state(proc_state)
                 except Exception as e:
@@ -1487,30 +1488,37 @@ class zynthian_state_manager:
         for cc_map in restored_cc_mapping:
             processor = self.chain_manager.processors[cc_map[0]]
             try:
-                zctrl = processor.controllers_dict[cc_map[2]]
-                self.chain_manager.add_midi_learn(processor.midi_chan, cc_map[1], zctrl)
+                zctrl = processor.controllers_dict[cc_map[1]]
+                self.chain_manager.add_midi_learn(cc_map[2], cc_map[3], zctrl)
             except:
-                logging.warning(f"Failed to restore MIDI learning {cc_map[1]} => {cc_map[2]}")
+                logging.warning(f"Failed to restore MIDI learning {cc_map[2]}#{cc_map[3]} => {cc_map[0]}:{cc_map[1]}")
 
         if "active_chain" in zs3_state:
             self.chain_manager.set_active_chain_by_id(zs3_state["active_chain"])
-
-        if "mixer" in zs3_state:
-            try:
-                restore_flag = zs3_state["mixer"]["restore"]
-            except:
-                restore_flag = True
-            if restore_flag:
-                self.set_busy_details("restoring mixer state")
-                self.zynmixer.set_state(zs3_state["mixer"])
+        if "active_phrase" in zs3_state:
+            active_phrase = zs3_state["active_phrase"]
 
         if "midi_capture" in zs3_state:
             self.set_busy_details("restoring midi capture state")
-            self.set_midi_capture_state(zs3_state['midi_capture'])
+            self.set_midi_capture_state(zs3_state['midi_capture'], restore_midi_learn=restore_midi_learn)
 
         if "global" in zs3_state:
+            try:
+                zynautoconnect.set_ext_clock_device_name(zs3_state["global"]["clock_source"])
+            except:
+                zynautoconnect.set_ext_clock_device_name(None)
+            try:
+                zynautoconnect.set_midi_clock_output_ports(zs3_state["global"]["clock_outputs"])
+            except:
+                zynautoconnect.set_midi_clock_output_ports([])
+            try:
+                zynautoconnect.set_zynseq_exclude_ports(zs3_state["global"]["zynseq_excluded_inputs"])
+            except:
+                zynautoconnect.set_zynseq_exclude_ports([])
+
             if "midi_transpose" in zs3_state["global"]:
                 lib_zyncore.set_global_transpose(int(zs3_state["global"]["midi_transpose"]))
+
             if "zctrl_x" in zs3_state["global"]:
                 try:
                     processor = self.chain_manager.processors[zs3_state["global"]["zctrl_x"][0]]
@@ -1533,10 +1541,12 @@ class zynthian_state_manager:
                 except:
                     pass
 
-        if zs3_id != 'zs3-0':
+        if zs3_id == 'zs3-0':
+            self.last_zs3_id = None
+        else:
             self.last_zs3_id = zs3_id
-            #self.zs3['zs3-0'] = self.zs3[zs3_id].copy()
-        zynsigman.send(zynsigman.S_STATE_MAN, self.SS_LOAD_ZS3, zs3_id=zs3_id)
+        self.zynseq.select_phrase(active_phrase, True)
+        zynsigman.send(zynsigman.S_STATE_MAN, zynsigman.SS_LOAD_ZS3, zs3_id=zs3_id)
 
         if autoconnect:
             zynautoconnect.request_midi_connect(True)
@@ -1553,7 +1563,7 @@ class zynthian_state_manager:
                     pass
             elif zid.startswith("zs3-"):
                 try:
-                    used_ids.append(int(zid.split('-')[1]))
+                    used_indexes.append(int(zid.split('-')[1]))
                 except:
                     pass
 
@@ -1586,17 +1596,38 @@ class zynthian_state_manager:
             else:
                 title = f"ZS3-{index}"
 
+        # Store persistent config
+        omit_processors = []
+        omit_chains = []
+        restore_midi_learn = False
+        if zs3_id in self.zs3:
+            zs3 = self.zs3[zs3_id]
+            if "processors" in zs3:
+                for proc_id, proc in zs3["processors"].items():
+                    if "restore" in proc and not proc["restore"]:
+                        omit_processors.append(proc_id)
+            if "chains" in zs3:
+                for chain_id, chain in zs3["chains"].items():
+                    if "restore" in chain and not chain["restore"]:
+                        omit_chains.append(chain_id)
+            restore_midi_learn = zs3.get("restore_midi_learn", False)
+
         # Initialise zs3
         self.zs3[zs3_id] = {
             "title": title,
-            "active_chain": self.chain_manager.active_chain_id,
+            "active_chain": self.chain_manager.active_chain.chain_id,
             "global": {}
         }
+        if restore_midi_learn:
+            self.zs3[zs3_id]["restore_midi_learn"] = True
+
         chain_states = {}
         for chain_id, chain in self.chain_manager.chains.items():
             chain_state = {
-                "midi_chan": chain.midi_chan
+                "midi_learn": {}
             }
+            if chain_id in omit_chains:
+                chain_state["restore"] = False
             if chain.is_midi():
                 note_low = lib_zyncore.zmop_get_note_low(chain.zmop_index)
                 if note_low > 0:
@@ -1610,12 +1641,11 @@ class zynthian_state_manager:
                 transpose_semitone = lib_zyncore.zmop_get_transpose_semitone(chain.zmop_index)
                 if transpose_semitone:
                     chain_state["transpose_semitone"] = transpose_semitone
+                chain_state["midi_chan"] = chain.midi_chan
                 if chain.midi_in:
                     chain_state["midi_in"] = chain.midi_in.copy()
                 if chain.midi_out:
                     chain_state["midi_out"] = chain.midi_out.copy()
-                if chain.midi_thru:
-                    chain_state["midi_thru"] = chain.midi_thru
             chain_state["audio_in"] = chain.audio_in.copy()
             chain_state["audio_out"] = []
             for out in chain.audio_out:
@@ -1626,18 +1656,13 @@ class zynthian_state_manager:
                             out = [i, port_name]
                             break
                 chain_state["audio_out"].append(out)
-            if chain.audio_thru:
-                chain_state["audio_thru"] = chain.audio_thru
             # Add chain MIDI mapping
             for key, zctrls in self.chain_manager.chain_midi_cc_binding.items():
                 if chain_id == (key >> 16) & 0xff:
-                    cc = (key >> 8) & 0x7f
-                    # TODO: Do not save default engine mapping
-                    if "midi_cc" not in chain_state:
-                        chain_state["midi_cc"] = {}
-                    chain_state["midi_cc"][cc] = []
+                    key_low = key & 0xff7f
+                    chain_state["midi_learn"][key_low] = []
                     for zctrl in zctrls:
-                        chain_state["midi_cc"][cc].append([zctrl.processor.id, zctrl.symbol])
+                        chain_state["midi_learn"][key_low].append([zctrl.processor.id, zctrl.symbol])
             if chain_state:
                 chain_states[chain_id] = chain_state
         if chain_states:
@@ -1653,6 +1678,9 @@ class zynthian_state_manager:
                 "preset_subdir_info": processor.preset_subdir_info,
                 "controllers": {}
             }
+            if id in omit_processors:
+                processor_state["restore"] = False
+
             # Add controllers
             for symbol, zctrl in processor.controllers_dict.items():
                 processor_state["controllers"][symbol] = zctrl.get_state()
@@ -1660,17 +1688,15 @@ class zynthian_state_manager:
         if processor_states:
             self.zs3[zs3_id]["processors"] = processor_states
 
-        # Add mixer state
-        mixer_state = self.zynmixer.get_state(False)
-        if mixer_state:
-            self.zs3[zs3_id]["mixer"] = mixer_state
-
         # Add MIDI capture state
         mcstate = self.get_midi_capture_state()
         if mcstate:
             self.zs3[zs3_id]["midi_capture"] = mcstate
 
         # Add global parameters
+        self.zs3[zs3_id]["global"]["clock_source"] = zynautoconnect.get_ext_clock_device_name()
+        self.zs3[zs3_id]["global"]["clock_outputs"] = zynautoconnect.get_midi_clock_output_ports()
+        self.zs3[zs3_id]["global"]["zynseq_excluded_inputs"] = zynautoconnect.get_zynseq_exclude_ports()
         self.zs3[zs3_id]["global"]["midi_transpose"] = lib_zyncore.get_global_transpose()
         try:
             processor_id = self.zctrl_x.processor.id
@@ -1698,11 +1724,13 @@ class zynthian_state_manager:
         except:
             pass
 
-        if zs3_id != 'zs3-0':
+        if zs3_id == 'zs3-0':
+            self.last_zs3_id = None
+        else:
             self.last_zs3_id = zs3_id
             # Jofemodo: this has not sense from my POV
             #self.zs3['zs3-0'] = self.zs3[zs3_id].copy()
-        zynsigman.send(zynsigman.S_STATE_MAN, self.SS_SAVE_ZS3, zs3_id=zs3_id)
+        zynsigman.send(zynsigman.S_STATE_MAN, zynsigman.SS_SAVE_ZS3, zs3_id=zs3_id)
 
     def delete_zs3(self, zs3_id):
         """Remove a ZS3
@@ -1763,7 +1791,7 @@ class zynthian_state_manager:
 
         for key, state in self.zs3.items():
             if state["active_chain"] not in self.chain_manager.chains:
-                state["active_chain"] = self.chain_manager.active_chain_id
+                state["active_chain"] = self.chain_manager.active_chain.chain_id
             if "processors" in state:
                 for processor_id in list(state["processors"]):
                     if int(processor_id) not in self.chain_manager.processors:
@@ -1780,13 +1808,21 @@ class zynthian_state_manager:
     def get_last_zs3_index(self):
         return list(self.zs3.keys()).index(self.last_zs3_id)
 
-    def load_zs3_by_index(self, index):
+    def get_zs3_id_by_index(self, index):
         try:
-            zs3_id = list(self.zs3.keys())[index]
+            return list(self.zs3.keys())[index]
         except:
             logging.warning(f"Can't find ZS3 with index {index}")
-            return
-        return self.load_zs3(zs3_id)
+
+    def save_zs3_by_index(self, index):
+        zs3_id = self.get_zs3_id_by_index(index)
+        if zs3_id:
+            return self.save_zs3(zs3_id)
+
+    def load_zs3_by_index(self, index):
+        zs3_id = self.get_zs3_id_by_index(index)
+        if zs3_id:
+            return self.load_zs3(zs3_id)
 
     def load_next_zs3(self):
         try:
@@ -1824,6 +1860,7 @@ class zynthian_state_manager:
         logging.info("All Sounds Off!")
         for chan in range(16):
             lib_zyncore.ui_send_ccontrol_change(chan, 120, 0)
+        self.zynseq.transport_stop("ALL")
 
     def all_notes_off(self):
         logging.info("All Notes Off!")
@@ -1834,7 +1871,7 @@ class zynthian_state_manager:
             lib_zyncore.zynaptik_all_gates_off()
         except:
             pass
-        zynsigman.send_queued(zynsigman.S_STATE_MAN, self.SS_ALL_NOTES_OFF, chan=None)
+        zynsigman.send_queued(zynsigman.S_STATE_MAN, zynsigman.SS_ALL_NOTES_OFF, chan=None)
 
     def raw_all_notes_off(self):
         logging.info("Raw All Notes Off!")
@@ -1847,7 +1884,7 @@ class zynthian_state_manager:
     def all_notes_off_chan(self, chan):
         logging.info(f"All Notes Off for channel {chan}!")
         lib_zyncore.ui_send_ccontrol_change(chan, 123, 0)
-        zynsigman.send_queued(zynsigman.S_STATE_MAN, self.SS_ALL_NOTES_OFF, chan=chan)
+        zynsigman.send_queued(zynsigman.S_STATE_MAN, zynsigman.SS_ALL_NOTES_OFF, chan=chan)
 
     def raw_all_notes_off_chan(self, chan):
         logging.info(f"Raw All Notes Off for channel {chan}!")
@@ -1903,11 +1940,12 @@ class zynthian_state_manager:
                     routed_chains.append(ch)
             mcstate[uid] = {
                 "zmip_input_mode": bool(lib_zyncore.zmip_get_flag_active_chain(izmip)),
-                "zmip_system": bool(lib_zyncore.zmip_get_flag_system(izmip)),
-                "zmip_system_rt": bool(lib_zyncore.zmip_get_flag_system_rt(izmip)),
+                #"zmip_system": bool(lib_zyncore.zmip_get_flag_system(izmip)),
+                #"zmip_system_rt": bool(lib_zyncore.zmip_get_flag_system_rt(izmip)),
                 "disable_ctrldev": self.ctrldev_manager.get_disabled_driver(uid),
                 "ctrldev_driver": self.ctrldev_manager.get_driver_class_name(izmip),
-                "routed_chains": routed_chains
+                "routed_chains": routed_chains,
+                "midi_learn": {}
             }
             # Ctrldev driver state
             if uid in ctrldev_state_drivers:
@@ -1917,82 +1955,103 @@ class zynthian_state_manager:
                 mcstate[uid]["audio_in"] = self.aubio_in
             # Add global / absolute MIDI mapping
             for key, zctrls in self.chain_manager.absolute_midi_cc_binding.items():
-                if izmip == (key >> 24) & 0xff:
-                    chan_cc = (key >> 8) & 0x7f7f
-                    if "midi_cc" not in mcstate[uid]:
-                        mcstate[uid]["midi_cc"] = {}
-                    mcstate[uid]["midi_cc"][chan_cc] = []
+                if izmip == (key >> 16) & 0xff:
+                    key_low = key & 0xff7f
+                    mcstate[uid]["midi_learn"][key_low] = []
                     for zctrl in zctrls:
-                        mcstate[uid]["midi_cc"][chan_cc].append([zctrl.processor.id, zctrl.symbol])
+                        mcstate[uid]["midi_learn"][key_low].append([zctrl.processor.id, zctrl.symbol])
+
+        mcstate["zynmidi"] = {"midi_learn": {}}
+        # Add global / absolute MIDI mapping
+        for key, zctrls in self.chain_manager.absolute_midi_cc_binding.items():
+            if 0xff0000 == key & 0xff0000:
+                key_low = key & 0xff7f
+                mcstate["zynmidi"]["midi_learn"][key_low] = []
+                for zctrl in zctrls:
+                    mcstate["zynmidi"]["midi_learn"][key_low].append([zctrl.processor.id, zctrl.symbol])
 
         return mcstate
 
-    def set_midi_capture_state(self, mcstate=None):
-        """Set midi input (capture) state: flags, chain routing, etc.
-
-        mcstate : dictionary with state. None for reset state to defaults.
+    def set_midi_capture_state(self, mcstate=None, restore_midi_learn=True):
+        """ Set midi input (capture) state: flags, chain routing, etc.
+        Args:
+            mcstate : dictionary with state. None for reset state to defaults.
+            restore_midi_learn: True to restore absolute MIDI CC binding
         """
         if mcstate:
             ctrldev_state_drivers = {}
             for uid, state in mcstate.items():
                 #logging.debug(f"MCSTATE {uid} => {state}")
-                izmip = zynautoconnect.get_midi_in_devid_by_uid(uid, zynthian_gui_config.midi_usb_by_port)
-                if izmip is None:
-                    continue
-                try:
-                    lib_zyncore.zmip_set_flag_active_chain(izmip, bool(state["zmip_input_mode"]))
-                except:
-                    pass
-                try:
-                    lib_zyncore.zmip_set_flag_system(izmip, bool(state["zmip_system"]))
-                except:
-                    pass
-                try:
-                    lib_zyncore.zmip_set_flag_system_rt(izmip, bool(state["zmip_system_rt"]))
-                except:
-                    pass
-                try:
-                    self.aubio_in = state["audio_in"]
-                except:
-                    pass
-                zynautoconnect.update_midi_in_dev_mode(izmip)
-                try:
-                    # TODO: Use ctrldev_driver=None to disable driver
-                    if state["disable_ctrldev"]:
-                        self.ctrldev_manager.unload_driver(izmip, True)
-                    else:
-                        self.ctrldev_manager.load_driver(izmip, state["ctrldev_driver"])
-                except:
-                    pass
-                try:
-                    ctrldev_state_drivers[uid] = state["ctrldev_state"]
-                except:
-                    pass
-                # Route chain zmops
-                try:
-                    routed_chains = state["routed_chains"]
-                    for ch in range(0, 16):
-                        lib_zyncore.zmop_set_route_from(ch, izmip, ch in routed_chains)
-                except:
-                    pass
+                if uid != "zynmidi":
+                    izmip = zynautoconnect.get_midi_in_devid_by_uid(uid, zynthian_gui_config.midi_usb_by_port)
+                    if izmip is None:
+                        continue
+                    try:
+                        lib_zyncore.zmip_set_flag_active_chain(izmip, bool(state["zmip_input_mode"]))
+                    except:
+                        pass
+                    """
+                    try:
+                        lib_zyncore.zmip_set_flag_system(izmip, bool(state["zmip_system"]))
+                    except:
+                        pass
+                    try:
+                        lib_zyncore.zmip_set_flag_system_rt(izmip, bool(state["zmip_system_rt"]))
+                    except:
+                        pass
+                    """
+                    try:
+                        self.aubio_in = state["audio_in"]
+                    except:
+                        pass
+                    zynautoconnect.update_midi_in_dev_mode(izmip)
+                    try:
+                        # TODO: Use ctrldev_driver=None to disable driver
+                        if state["disable_ctrldev"]:
+                            self.ctrldev_manager.unload_driver(izmip, True)
+                        else:
+                            self.ctrldev_manager.load_driver(izmip, state["ctrldev_driver"])
+                    except:
+                        pass
+                    try:
+                        ctrldev_state_drivers[uid] = state["ctrldev_state"]
+                    except:
+                        pass
+                    # Route chain zmops
+                    try:
+                        routed_chains = state["routed_chains"]
+                        for ch in range(0, 16):
+                            lib_zyncore.zmop_set_route_from(ch, izmip, ch in routed_chains)
+                    except:
+                        pass
+                else:
+                    izmip = 0xff
 
-                if "midi_cc" in state:
-                    for chan_cc, cfg in state["midi_cc"].items():
-                        chan_cc = int(chan_cc)
-                        for proc_id, symbol in cfg:
-                            try:
-                                processor = self.chain_manager.processors[proc_id]
-                            except:
-                                continue
-                            try:
-                                zctrl = processor.controllers_dict[symbol]
-                            except:
-                                logging.warning(f"Can't MIDI learn '{symbol}'. Controller not found in processor {proc_id}.")
-                                continue
-                            chan = (chan_cc >> 8) & 0xff
-                            cc = chan_cc & 0x7f
-                            self.chain_manager.add_midi_learn(chan, cc, zctrl, izmip)
-
+                # Absolute MIDI-learn state
+                if restore_midi_learn:
+                    try:
+                        midi_learn_state = state["midi_learn"]
+                    except:
+                        try:
+                            midi_learn_state = state["midi_cc"]
+                        except:
+                            midi_learn_state = None
+                    if midi_learn_state:
+                        for key_low, cfg in midi_learn_state.items():
+                            key_low = int(key_low)
+                            for proc_id, symbol in cfg:
+                                try:
+                                    processor = self.chain_manager.processors[proc_id]
+                                except:
+                                    continue
+                                try:
+                                    zctrl = processor.controllers_dict[symbol]
+                                except:
+                                    logging.warning(f"Can't MIDI learn '{symbol}'. Controller not found in processor {proc_id}.")
+                                    continue
+                                chan = (key_low >> 8) & 0xff
+                                cc = key_low & 0x7f
+                                self.chain_manager.add_midi_learn(chan, cc, zctrl, izmip)
             self.ctrldev_manager.set_state_drivers(ctrldev_state_drivers)
 
         else:
@@ -2058,11 +2117,18 @@ class zynthian_state_manager:
             # Set MIDI Master Channel
             lib_zyncore.set_midi_master_chan(zynthian_gui_config.master_midi_channel)
             # Setup MIDI filter rules
-            if self.midi_filter_script:
-                self.midi_filter_script.clean()
-            self.midi_filter_script = zynthian_midi_filter.MidiFilterScript(zynthian_gui_config.midi_filter_rules)
+            self.init_midi_filter()
         except Exception as e:
             logging.error(f"ERROR initializing MIDI : {e}")
+
+    def init_midi_filter(self):
+        """Reload MIDI Filter Rules"""
+        if self.midi_filter_script:
+            self.midi_filter_script.clean()
+        midi_filter_rules = zynthian_gui_config.midi_filter_rules
+        if zynthian_gui_config.midi_chanpress_cc > 0:
+            midi_filter_rules += f"\nMAP  CP =>  CC#{zynthian_gui_config.midi_chanpress_cc}\n"
+        self.midi_filter_script = zynthian_midi_filter.MidiFilterScript(midi_filter_rules)
 
     def reload_midi_config(self):
         """Reload MIDI configuration from saved state"""
@@ -2087,48 +2153,13 @@ class zynthian_state_manager:
         self.default_aubionotes()
 
     # -------------------------------------------------------------------
-    # MIDI transport & clock settings
-    # -------------------------------------------------------------------
-
-    def get_transport_clock_source(self):
-        val = self.zynseq.libseq.getClockSource()
-        if val == 5:
-            return 3
-        elif val == 2:
-            return 2
-        elif self.zynseq.libseq.getMidiClockOutput():
-            return 1
-        else:
-            return 0
-
-    def set_transport_clock_source(self, val=None, save_config=False):
-        if val is None:
-            val = zynthian_gui_config.transport_clock_source
-
-        if val == 2:
-            self.zynseq.libseq.setClockSource(2)
-        elif val == 3:
-            self.zynseq.libseq.setClockSource(1 | 4)
-        else:
-            self.zynseq.libseq.setClockSource(1)
-
-        self.zynseq.libseq.setMidiClockOutput(val == 1)
-
-        # Save config
-        if save_config:
-            zynthian_gui_config.transport_clock_source = val
-            zynconf.update_midi_profile({
-                "ZYNTHIAN_MIDI_TRANSPORT_CLOCK_SOURCE": str(int(val))
-            })
-
-    # -------------------------------------------------------------------
     # MIDI profile
     # -------------------------------------------------------------------
 
     def get_midi_profile_state(self):
         """Get MIDI profile state as an ordered dictionary"""
 
-        midi_profile_state = OrderedDict()
+        midi_profile_state = {}
         for key in os.environ.keys():
             if key.startswith("ZYNTHIAN_MIDI_"):
                 midi_profile_state[key[14:]] = os.environ[key]
@@ -2151,7 +2182,6 @@ class zynthian_state_manager:
             zynthian_gui_config.set_midi_config()
             self.init_midi()
             self.init_midi_services()
-            self.set_transport_clock_source()
             zynautoconnect.request_midi_connect()
             return True
 
@@ -2166,16 +2196,12 @@ class zynthian_state_manager:
 
     def create_audio_player(self):
         if not self.audio_player:
-            try:
-                self.audio_player = zynthian_processor("AP", self.chain_manager.engine_info["AP"])
-                self.chain_manager.start_engine(self.audio_player, "AP")
-            except Exception as e:
-                logging.error(
-                    f"Can't create global Audio Player instance => {e}\n{traceback.format_exc()}")
+            self.audio_player = self.chain_manager.add_processor(None, "AP", None, AUDIO_PLAYER_ID)
+            self.audio_player.name = "Audio Player"
 
     def destroy_audio_player(self):
         if self.audio_player:
-            self.audio_player.engine.remove_processor(self.audio_player)
+            self.chain_manager.remove_processor(None, self.audio_player)
             self.audio_player = None
             self.status_audio_player = False
 
@@ -2228,7 +2254,7 @@ class zynthian_state_manager:
         if not libsmf.isRecording():
             libsmf.unload(self.smf_recorder)
             libsmf.startRecording()
-            zynsigman.send(zynsigman.S_STATE_MAN, self.SS_MIDI_RECORDER_STATE, state=True)
+            zynsigman.send(zynsigman.S_STATE_MAN, zynsigman.SS_MIDI_RECORDER_STATE, state=True)
             return True
         else:
             return False
@@ -2245,7 +2271,7 @@ class zynthian_state_manager:
                 self.last_midi_file = fpath
                 result = True
 
-            zynsigman.send(zynsigman.S_STATE_MAN, self.SS_MIDI_RECORDER_STATE, state=False)
+            zynsigman.send(zynsigman.S_STATE_MAN, zynsigman.SS_MIDI_RECORDER_STATE, state=False)
 
         return result
 
@@ -2257,7 +2283,6 @@ class zynthian_state_manager:
 
     def set_tempo(self, tempo):
         self.zynseq.set_tempo(tempo)
-        zynaudioplayer.set_tempo(tempo)
 
     def start_midi_playback(self, fpath):
         self.stop_midi_playback()
@@ -2287,10 +2312,9 @@ class zynthian_state_manager:
             self.zynseq.transport_start("zynsmf")
             if libsmf.getPlayState() != zynsmf.PLAY_STATE_STOPPED:
                 self.status_midi_player = True
-                zynsigman.send(zynsigman.S_STATE_MAN, self.SS_MIDI_PLAYER_STATE, state=True)
+                zynsigman.send(zynsigman.S_STATE_MAN, zynsigman.SS_MIDI_PLAYER_STATE, state=True)
                 self.status_midi_player = False
             self.last_midi_file = fpath
-            # self.zynseq.libseq.transportLocate(0)
         except Exception as e:
             logging.error(f"ERROR STARTING MIDI PLAY: {e}")
             return False
@@ -2299,8 +2323,9 @@ class zynthian_state_manager:
     def stop_midi_playback(self):
         if libsmf.getPlayState() != zynsmf.PLAY_STATE_STOPPED:
             libsmf.stopPlayback()
+            self.zynseq.transport_stop("zynsmf")
             self.status_midi_player = False
-            zynsigman.send(zynsigman.S_STATE_MAN, self.SS_MIDI_PLAYER_STATE, state=False)
+            zynsigman.send(zynsigman.S_STATE_MAN, zynsigman.SS_MIDI_PLAYER_STATE, state=False)
         return self.status_midi_player
 
     def toggle_midi_playback(self, fname=None):
@@ -2331,7 +2356,7 @@ class zynthian_state_manager:
         # Start VNC for Engine's native GUIs
         if not zynconf.is_service_active("vncserver1"):
             # Save state and stop engines
-            if self.chain_manager.get_chain_count() > 0:
+            if self.chain_manager.get_chain_count() > 1:
                 self.save_last_state_snapshot()
                 restore_state = True
             else:
@@ -2427,7 +2452,7 @@ class zynthian_state_manager:
             zynthian_gui_config.midi_netump_enabled = 1
             return
         self.start_busy("start_netump", "starting NetUMP MIDI 2.0")
-        logging.info("STARTING NetUMP MIDI 2.0")
+        logging.info("STARTING Network MIDI 2.0")
         try:
             check_output(f"systemctl start {service}", shell=True)
             zynthian_gui_config.midi_netump_enabled = 1
@@ -2441,7 +2466,7 @@ class zynthian_state_manager:
             zynautoconnect.request_midi_connect(True)
         except Exception as e:
             logging.error(e)
-            self.set_busy_error("ERROR STARTING NetUMP MIDI 2.0", e)
+            self.set_busy_error("ERROR STARTING Network MIDI 2.0", e)
             sleep(2.0)
 
         self.end_busy("start_netump")
@@ -2451,8 +2476,8 @@ class zynthian_state_manager:
         if not zynconf.is_service_active(service):
             zynthian_gui_config.midi_netump_enabled = 0
             return
-        self.start_busy("stop_netump", "stopping NetUMP MIDI 2.0")
-        logging.info("STOPPING NetUMP MIDI 2.0")
+        self.start_busy("stop_netump", "stopping Network MIDI 2.0")
+        logging.info("STOPPING Network MIDI 2.0")
         try:
             check_output(f"systemctl stop {service}", shell=True)
             zynthian_gui_config.midi_netump_enabled = 0
@@ -2465,7 +2490,7 @@ class zynthian_state_manager:
 
         except Exception as e:
             logging.error(e)
-            self.set_busy_error("ERROR STOPPING NetUMP MIDI 2.0", e)
+            self.set_busy_error("ERROR STOPPING Network MIDI 2.0", e)
             sleep(2.0)
 
         self.end_busy("stop_netump")
@@ -2636,11 +2661,22 @@ class zynthian_state_manager:
         else:
             self.stop_touchosc2midi(False)
 
+    # Unblock all soft-blocked bluetooth controllers
+    def unblock_bluetooth_controllers(self):
+        self.start_busy("Unblock Bluetooth Controllers")
+        for row in check_output("rfkill -n", shell=True, encoding="utf-8").split("\n"):
+            parts = row.split()  # ID, type, device, soft blocked, hard blocked
+            if len(parts) == 5 and parts[1].strip() == "bluetooth" and parts[3].strip() == "blocked":
+                logging.debug(f"Unblocking {parts[0].strip()}")
+                check_output(f"rfkill unblock {parts[0].strip()}", shell=True)
+        self.end_busy("Unblock Bluetooth Controllers")
+
     def select_bluetooth_controller(self, controller):
         if controller.count(":") != 5:
+            logging.error(f"Bad controller address ({controller})!")
             return
-        proc = Popen('bluetoothctl', stdin=PIPE, stdout=PIPE,
-                     stderr=PIPE, encoding='utf-8')
+        self.unblock_bluetooth_controllers()
+        proc = Popen('bluetoothctl', stdin=PIPE, stdout=PIPE, stderr=PIPE, encoding='utf-8')
         for addr in check_output("bluetoothctl list", shell=True, timeout=1, encoding="utf-8").split():
             if addr.count(":") == 5:
                 proc.stdin.write(f"select {addr}\n")
@@ -2660,8 +2696,7 @@ class zynthian_state_manager:
         service = "bluetooth"
         if zynconf.is_service_active(service):
             zynthian_gui_config.bluetooth_enabled = 1
-            self.select_bluetooth_controller(
-                zynthian_gui_config.ble_controller)
+            self.select_bluetooth_controller(zynthian_gui_config.ble_controller)
             return
         self.start_busy("start_bluetooth", "starting Bluetooth")
         logging.info("STARTING Bluetooth")
@@ -2669,8 +2704,7 @@ class zynthian_state_manager:
             check_output(f"systemctl start {service}", shell=True, timeout=2)
             sleep(wait)
             zynthian_gui_config.bluetooth_enabled = 1
-            self.select_bluetooth_controller(
-                zynthian_gui_config.ble_controller)
+            self.select_bluetooth_controller(zynthian_gui_config.ble_controller)
             # Update MIDI profile
             if save_config:
                 zynconf.update_midi_profile({
@@ -2817,7 +2851,7 @@ class zynthian_state_manager:
                 # else => Check for commits to pull
                 else:
                     for repo in repos:
-                        path = f"/zynthian/{repo}"
+                        path = f"/{zynthian_dir}/{repo}"
                         branch = get_repo_branch(path)
                         local_hash = check_output(["git", "-C", path, "rev-parse", "HEAD"],
                                                   encoding="utf-8", stderr=STDOUT).strip()

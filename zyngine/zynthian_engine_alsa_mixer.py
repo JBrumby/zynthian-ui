@@ -4,7 +4,7 @@
 #
 # zynthian_engine implementation for Alsa Mixer
 #
-# Copyright (C) 2015-2025 Fernando Moyano <jofemodo@zynthian.org>
+# Copyright (C) 2015-2026 Fernando Moyano <jofemodo@zynthian.org>
 #
 # ******************************************************************************
 #
@@ -31,8 +31,8 @@ import alsaaudio
 from subprocess import check_output
 
 from zyncoder.zyncore import lib_zyncore
-from . import zynthian_engine
-from . import zynthian_controller
+from zyngine.zynthian_engine import zynthian_engine
+from zyngine.zynthian_controller import zynthian_controller
 
 # ------------------------------------------------------------------------------
 # ALSA Mixer Engine Class
@@ -61,12 +61,6 @@ class zynthian_engine_alsa_mixer(zynthian_engine):
     # ---------------------------------------------------------------------------
 
     device_overrides = {}
-
-    # ---------------------------------------------------------------------------
-    # Controllers & Screens
-    # ---------------------------------------------------------------------------
-
-    _ctrl_screens = []
 
     # ----------------------------------------------------------------------------
     # ZynAPI variables
@@ -233,7 +227,7 @@ class zynthian_engine_alsa_mixer(zynthian_engine):
                 except:
                     ctrl_array = False
                 while True:
-                    # Iterate through all elements of array
+                    # Iterate through all elements of array until idx exceeds array size
                     try:
                         mixer_ctrl = alsaaudio.Mixer(ctrl_name, idx, -1, device)
                         switch_cap = mixer_ctrl.switchcap()  # May be arbitrary switch, not necessarily mute

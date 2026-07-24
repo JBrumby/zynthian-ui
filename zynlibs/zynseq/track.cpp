@@ -15,12 +15,12 @@ std::normal_distribution d{0.0, 1.0};
 bool Track::addPattern(uint32_t position, Pattern* pattern, bool force) {
     // Find (and remove) overlapping patterns
     uint32_t nStart = position;
-    uint32_t nEnd   = nStart + pattern->getLength();
+    uint32_t nEnd = nStart + pattern->getLength();
     for (uint32_t nClock = 0; nClock <= position + pattern->getLength(); ++nClock) {
         if (m_mPatterns.find(nClock) != m_mPatterns.end()) {
-            Pattern* pPattern       = m_mPatterns[nClock];
+            Pattern* pPattern = m_mPatterns[nClock];
             uint32_t nExistingStart = nClock;
-            uint32_t nExistingEnd   = nExistingStart + pPattern->getLength();
+            uint32_t nExistingEnd = nExistingStart + pPattern->getLength();
 
             if ((nStart >= nExistingStart && nStart < nExistingEnd) || (nEnd > nExistingStart && nEnd <= nExistingEnd)) {
                 if (!force)
@@ -34,7 +34,7 @@ bool Track::addPattern(uint32_t position, Pattern* pattern, bool force) {
     }
     m_mPatterns[position] = pattern;
     if (m_nTrackLength < position + pattern->getLength())
-        m_nTrackLength = position + pattern->getLength(); //!@todo Does this shrink and stretch song?
+        m_nTrackLength = position + pattern->getLength(); //!@todo Does this shrink and stretch scene?
     m_bChanged = true;
     return true;
 }
@@ -62,20 +62,6 @@ Pattern* Track::getPatternAt(uint32_t position) {
     return NULL;
 }
 
-uint8_t Track::getType() { return m_nType; }
-
-void Track::setType(uint8_t type) {
-    m_nType    = type;
-    m_bChanged = true;
-}
-
-uint8_t Track::getChainID() { return m_nChainID; }
-
-void Track::setChainID(uint8_t chain_id) {
-    m_nChainID = chain_id;
-    m_bChanged = true;
-}
-
 uint8_t Track::getChannel() { return m_nChannel; }
 
 void Track::setChannel(uint8_t channel) {
@@ -88,39 +74,38 @@ void Track::setChannel(uint8_t channel) {
 uint8_t Track::getOutput() { return m_nOutput; }
 
 void Track::setOutput(uint8_t output) {
-    m_nOutput  = output;
+    m_nOutput = output;
     m_bChanged = true;
 }
 
-uint8_t Track::clock(uint32_t nTime, uint32_t nPosition, double dSamplesPerClock, bool bSync) {
+uint8_t Track::clock(uint32_t nTime, uint32_t nPosition, bool bSync) {
     if (m_nTrackLength == 0)
         return 0;
     if (m_bMute)
         return 0;
-    m_dSamplesPerClock = dSamplesPerClock;
 
     if (m_mPatterns.find(nPosition) != m_mPatterns.end()) {
         // Playhead at start of pattern
         // fprintf(stderr, "Start of pattern\n");
         m_nCurrentPatternPos = nPosition;
-        m_nNextStep          = 0;
-        m_nNextEvent         = 0;
-        m_nClkPerStep        = m_mPatterns[m_nCurrentPatternPos]->getClocksPerStep();
+        m_nNextStep = 0;
+        m_nNextEvent = 0;
+        m_nClkPerStep = m_mPatterns[m_nCurrentPatternPos]->getClocksPerStep();
         if (m_nClkPerStep == 0)
             m_nClkPerStep = 1;
-        m_nEventValue    = -1;
-        m_nDivCount      = 0; // Trigger first step immediately
+        m_nEventValue = -1;
+        m_nDivCount = 0; // Trigger first step immediately
         m_nLastClockTime = nTime;
         // fprintf(stderr, "m_nCurrentPatternPos: %u m_nClkPerStep: %u\n", m_nCurrentPatternPos, m_nClkPerStep);
     } else if (m_nCurrentPatternPos >= 0 && nPosition >= m_nCurrentPatternPos + m_mPatterns[m_nCurrentPatternPos]->getLength()) {
         // At end of pattern
         // fprintf(stderr, "End of pattern\n");
         m_nCurrentPatternPos = -1;
-        m_nNextEvent         = -1;
-        m_nNextStep          = 0;
-        m_nClkPerStep        = 1;
-        m_nEventValue        = -1;
-        m_nDivCount          = 0;
+        m_nNextEvent = -1;
+        m_nNextStep = 0;
+        m_nClkPerStep = 1;
+        m_nEventValue = -1;
+        m_nDivCount = 0;
     } else {
         // Within pattern
         ++m_nDivCount;
@@ -131,7 +116,7 @@ uint8_t Track::clock(uint32_t nTime, uint32_t nPosition, double dSamplesPerClock
         // Reached next step
         // fprintf(stderr, "Reached next step \n");
         m_nLastClockTime = nTime;
-        m_nDivCount      = 0;
+        m_nDivCount = 0;
         ++m_nNextStep;
         m_nNextEvent = m_mPatterns[m_nCurrentPatternPos]->getFirstEventAtStep(m_nNextStep); //!@todo Could disable this check only when not editing pattern
     }
@@ -139,95 +124,247 @@ uint8_t Track::clock(uint32_t nTime, uint32_t nPosition, double dSamplesPerClock
     return m_nCurrentPatternPos >= 0 && m_nDivCount == 0;
 }
 
-SEQ_EVENT* Track::getEvent() {
+bool get_skip_from_freq(uint8_t freq, uint32_t nCount) {
+    uint8_t n = 1 + (freq >> 1);
+    uint8_t skip = freq & 0x1;
+    if (n == 1) {
+        if (skip) return false;     // Skip never (note enabled)
+        else return true;           // Skip always (note disabled)
+    }
+    else {
+        // if skip == 1 => skip each n counts
+        if (skip) {
+            if (nCount % n == n - 1) return true;
+            else return false;
+        }
+        // if skip == 0 => play each n counts
+        else {
+            if (nCount % n != n - 1) return true;
+            else return false;
+        }
+    }
+}
+
+SEQ_EVENT* Track::getEvent(uint32_t nCount) {
     // This function is called repeatedly for each clock period until no more events are available to populate JACK MIDI output schedule
-    static SEQ_EVENT seqEvent;         // A MIDI event timestamped for some imminent or future time
-    static uint32_t nStutterCount = 0; // Count stutters already added to this event
+    static SEQ_EVENT seqEvent;             // A MIDI event timestamped for some imminent or future time
+    static uint32_t nEventEndTime;         // End of event time (optimization)
+    static uint32_t nStutterSpeed = 0;     // Current stutter speed for this event
+    static uint32_t nStutterCount = 0;     // Count stutters already added to this event
+    static uint32_t nInterpolateCount = 0; // Count interpolations already added to this event
+    static uint32_t nInterpolateNum = 0;   // Number of interpolation points for this event
+    static float fInterpolateDelta = 0;    // Value delta for each interpolation point
     if (m_nCurrentPatternPos < 0 || m_nNextEvent < 0)
         return NULL; //!@todo Can we stop between note on and note off being processed resulting in stuck note?
     // Track is being played and playhead is within a pattern
     Pattern* pPattern = m_mPatterns[m_nCurrentPatternPos];
     StepEvent* pEvent = pPattern->getEventAt(m_nNextEvent); // Don't advance event here because need to interpolate
-    // fprintf(stderr, "Track::getEvent Next step:%u, next event:%u, event %u at time: %u, framesperclock: %f\n", m_nNextStep, m_nNextEvent, pEvent,
-    // pEvent->getPosition(), m_dSamplesPerClock);
+
+    // Found event at (or before) this step
     if (pEvent && pEvent->getPosition() == m_nNextStep) {
-        // Found event at (or before) this step
+
+        // We have reached the end of interpolation so move on to next event
         if (m_nEventValue == pEvent->getValue2end()) {
-            // We have reached the end of interpolation so move on to next event
             m_nEventValue = -1;
             pEvent = pPattern->getEventAt(++m_nNextEvent);
+            // No more events or next event is not this step so move to next step
             if (!pEvent || pEvent->getPosition() != m_nNextStep) {
-                // No more events or next event is not this step so move to next step
                 return NULL;
             }
         }
+
         uint8_t nCommand = pEvent->getCommand();
-        seqEvent.msg.command = nCommand | m_nChannel;
+
+        seqEvent.output = m_nOutput;
         //fprintf(stderr, "  found event at %u => %x, %u, %u\n", m_nNextStep, nCommand, pEvent->getValue1start(), pEvent->getValue2start());
 
-        // Have not yet started to interpolate value
+        // Last event already finished => Start new event!
         if (m_nEventValue == -1) {
-            // Note Play Chance
-            int playChance = int(RAND_MAX * pPattern->getPlayChance() * pEvent->getPlayChance() / 100.0);
-            if (playChance < RAND_MAX && playChance < rand()) {
-                m_nEventValue = pEvent->getValue2end();
-                seqEvent.msg.command = 0xFE;
-                return &seqEvent;
-            }
-            // Start interpolation
-            m_nEventValue = pEvent->getValue2start();
-            // Recorded Offset (fraction of step => float)
-            m_fEventOffset = pEvent->getOffset();
-            // Real-time quantization (step quantization => TODO quantize to step divisors: 1/2, 1/3, 1/4, 1/6, 1/8, ...)
-            if (pPattern->getQuantizeNotes()) {
-            	if (m_fEventOffset > 0.5) m_fEventOffset = 1.0;
-            	else m_fEventOffset = 0.0;
-			}
-            // Swing => Add to offset
-            uint32_t swingDiv = pPattern->getSwingDiv();
-            float swingAmount = pPattern->getSwingAmount();
-            if ((m_nNextStep + swingDiv) % (2 * swingDiv) == 0) {
-                m_fEventOffset += swingAmount;
-            }
-            // Time humanization => Add to offset
-            float humanTime = pPattern->getHumanTime();
-            if (humanTime > 0.0)
-                m_fEventOffset += humanTime * d(gen);
-            // Calculate event scheduled time
-            seqEvent.time = m_nLastClockTime + m_fEventOffset * pPattern->getClocksPerStep() * m_dSamplesPerClock;
-            // Reset Stutter
-            nStutterCount = 0;
-        } else if (pEvent->getValue2start() == m_nEventValue) {
-            //!@todo Don't get here if start and end values are the same, e.g. note on and off velocity are both 100
-            // Already processed start value
-            // Add note off/on for each stutter
-            if (nCommand == MIDI_NOTE_ON)
-                seqEvent.msg.command = (nStutterCount % 2 ? MIDI_NOTE_ON : MIDI_NOTE_OFF) | m_nChannel;
-            seqEvent.time = m_nLastClockTime + (m_fEventOffset + pEvent->getDuration()) * pPattern->getClocksPerStep() * m_dSamplesPerClock -
-                            1; // -1 to send note-off one sample before next step
-            if (pEvent->getStutterCount()) {
-                uint32_t stutter_time = m_nLastClockTime + (m_fEventOffset + pEvent->getStutterDur()) * ++nStutterCount * m_dSamplesPerClock;
-                if (stutter_time < seqEvent.time && 2 * pEvent->getStutterCount() >= nStutterCount)
-                    seqEvent.time = stutter_time;
-                else
+            // Play Frequency & Chance
+            if (nCommand == MIDI_NOTE_ON) {
+                // Play frequency
+                bool skip = get_skip_from_freq(pEvent->getPlayFreq(), nCount);
+                // Play chance (probability) => concatenated with frequency calc
+                if (!skip) {
+                    if (unsigned(RAND_MAX * pPattern->getPlayChance() * pEvent->getPlayChance()) < rand())
+                        skip = true;
+                }
+                if (skip) {
                     m_nEventValue = pEvent->getValue2end();
-            } else
-                m_nEventValue = pEvent->getValue2end(); //!@todo Currently just move straight to end value but should interpolate for CC
-            // fprintf(stderr, "Scheduling note off. Event duration: %u, clocks per step: %u, samples per clock: %u\n", pEvent->getDuration(),
-            // pPattern->getClocksPerStep(), m_nSamplePerClock);
+                    seqEvent.msg.command = 0xFE;
+                    return &seqEvent;
+                }
+            }
+            seqEvent.msg.command = nCommand | m_nChannel;
+            // Start value (interpolation)
+            m_nEventValue = pEvent->getValue2start();
+            // Offset (fraction of step => float)
+            m_fEventOffset = pEvent->getOffset();
+            // Setup interpolation
+            nInterpolateCount = 0;
+            nInterpolateNum = pEvent->getDuration() * pPattern->getClocksPerStep();
+            fInterpolateDelta = ((float)pEvent->getValue2end() - (float)pEvent->getValue2start()) / nInterpolateNum;
+            // Note quantization, swing & time humanization
+            if (nCommand == MIDI_NOTE_ON) {
+                // Real-time quantization (step quantization
+                uint8_t qn = pPattern->getQuantizeNotes();
+                // Quantize to step boundary (qn = 1)
+                if (qn == 1) {
+                    if (m_fEventOffset > 0.5) m_fEventOffset = 1.0;
+                    else m_fEventOffset = 0.0;
+                }
+                // Quantize to step fraction boundary (1/qn => 1/2, 1/3, 1/4, 1/6, 1/8, ...)
+                else if (qn > 1) {
+                    float os = m_fEventOffset;
+                    float m = m_fEventOffset * qn;
+                    uint8_t mi = (int)m;
+                    if ((m - mi) > 0.5) m_fEventOffset = (float)(mi + 1) / (float)qn;
+                    else m_fEventOffset = (float)mi / (float)qn;
+                    //printf("Event %d with Offset %f => Quantized (1/%d) to %f\n", pEvent->getPosition(), os, qn, m_fEventOffset);
+                }
+                // Swing => Add to offset
+                uint32_t swingDiv = pPattern->getSwingDiv();
+                float swingAmount = pPattern->getSwingAmount();
+                uint32_t swingStep = m_nNextStep + swingDiv;
+                if (m_fEventOffset > 0.5) swingStep++;
+                if (swingStep % (2 * swingDiv) == 0) {
+                    m_fEventOffset += swingAmount * swingDiv / 2;
+                }
+                // Time humanization => Add to offset
+                float humanTime = pPattern->getHumanTime();
+                if (humanTime > 0.0)
+                    m_fEventOffset += humanTime * d(gen);
+                // Setup stutter
+                nStutterCount = 0;
+                nStutterSpeed = pEvent->getStutterSpeed();
+                if (nStutterSpeed > 0) {
+                    // Stutter frequency
+                    bool skip = get_skip_from_freq(pEvent->getStutterFreq(), nCount);
+                    // Stutter chance (probability) => concatenated with frequency calc
+                    if (!skip) {
+                        if (unsigned(RAND_MAX * pEvent->getStutterChance()) < rand())
+                            skip = true;
+                    }
+                    if (skip)
+                        nStutterSpeed = 0;
+                    else
+                        // If stutter FX is fade-in => start interpolation from lowest velocity value
+                        if (pEvent->getStutterVelfx() == STUTTER_VELFX_FADEIN) {
+                            nInterpolateCount = pPattern->getClocksPerStep() / nStutterSpeed;
+                            m_nEventValue = 1 - fInterpolateDelta * nInterpolateCount;
+                        }
+                }
+            }
+            else {
+                //nStutterCount = 0;
+                nStutterSpeed = 0;
+            }
+            // Calculate event scheduled time
+            seqEvent.time = m_nLastClockTime + m_fEventOffset * pPattern->getClocksPerStep();
+            // Calculate note-off event scheduled time
+            // -1 to send note-off one tick before next step
+            nEventEndTime = seqEvent.time + pEvent->getDuration() * pPattern->getClocksPerStep() - 1;
         }
+        // Event already started
+        else if (m_nEventValue != pEvent->getValue2end()) {
+            // Process note stutter => Normal note off is processed like stutter. By default a note has stutter=0.
+            if (nCommand == MIDI_NOTE_ON) {
+                // Stutter enabled => Add note off/on for each stutter
+                if (nStutterSpeed > 0) {
+                    uint32_t clocks_per_step= pPattern->getClocksPerStep();
+                    // Stutter speed-ramp FX
+                    uint8_t speed = nStutterSpeed;
+                    switch (pEvent->getStutterRamp()) {
+                        case STUTTER_RAMP_NONE:
+                            break;
+                        case STUTTER_RAMP_UP:
+                            speed += (seqEvent.time - m_nLastClockTime) / clocks_per_step;
+                            break;
+                        case STUTTER_RAMP_DOWN:
+                            speed += pEvent->getDuration() - (seqEvent.time - m_nLastClockTime) / clocks_per_step;
+                            break;
+                    }
+                    // Calculate stutter event time
+                    uint32_t nclocks;
+                    if (speed > clocks_per_step) uint32_t nclocks = 1;
+                    else if (speed <= 0) nclocks = clocks_per_step;
+                    else nclocks = clocks_per_step / speed;
+                    uint32_t stutter_time = seqEvent.time + nclocks;
+                    // If not reached end of note
+                    if (stutter_time < nEventEndTime) {
+                        seqEvent.time = stutter_time;
+                        // Stutter alternate note-off and note-on events
+                        seqEvent.msg.command = (nStutterCount % 2 ? MIDI_NOTE_ON : MIDI_NOTE_OFF) | m_nChannel;
+                        nStutterCount++;
+                        // Stutter velocity FX => Interpolate velocity
+                        nInterpolateCount += nclocks;
+                        switch (pEvent->getStutterVelfx()) {
+                            // Flat
+                            case STUTTER_VELFX_NONE:
+                                break;
+                            // Fade-in
+                            case STUTTER_VELFX_FADEIN:
+                                m_nEventValue = - fInterpolateDelta * nInterpolateCount;
+                                break;
+                            // Fade-out
+                            case STUTTER_VELFX_FADEOUT:
+                                m_nEventValue = pEvent->getValue2start() + fInterpolateDelta * nInterpolateCount;
+                                break;
+                        }
+                    }
+                    // End of note
+                    else {
+                        seqEvent.time = nEventEndTime;
+                        seqEvent.msg.command = MIDI_NOTE_OFF | m_nChannel;
+                        m_nEventValue = pEvent->getValue2end(); // send end value
+                    }
+                // Stutter disabled (stutter speed = 0)
+                } else {
+                    seqEvent.time = nEventEndTime;
+                    seqEvent.msg.command = MIDI_NOTE_OFF | m_nChannel;
+                    m_nEventValue = pEvent->getValue2end();     // send end value
+                }
+            }
+            // CC interpolation => one value per clock but don't repeat values
+            else if (nCommand == MIDI_CONTROL) {
+                int8_t start_value = pEvent->getValue2start();
+                int8_t next_value;
+                do {
+                    seqEvent.time++;
+                    nInterpolateCount++;
+                    next_value = start_value + fInterpolateDelta * nInterpolateCount;
+                } while (seqEvent.time < nEventEndTime && next_value == m_nEventValue);
+                // If reached event's end time, send end value
+                if (seqEvent.time >= nEventEndTime) {
+                    seqEvent.time = nEventEndTime;
+                    next_value = pEvent->getValue2end();     // send end value
+                }
+                // Don't send repeated values
+                if (next_value == m_nEventValue) {
+                    seqEvent.msg.command = 0xFE;
+                    return &seqEvent;
+                }
+                seqEvent.msg.command = nCommand | m_nChannel;
+                m_nEventValue = next_value;
+                //fprintf(stderr, "Scheduling CC%u interpolated value => %u, %u\n", pEvent->getValue1start(), seqEvent.time, m_nEventValue);
+            }
+        }
+
+        // Set MIDI event values
         seqEvent.msg.value1 = pEvent->getValue1start();
-        // Velocity humanization
-        int8_t hval2 = m_nEventValue;
-        float humanVelo = pPattern->getHumanVelo();
-        if (humanVelo > 0.0) {
-            int16_t dvelo = int16_t(humanVelo * d(gen));
-            hval2 = int8_t(std::min(std::max(int16_t(hval2) + dvelo, 0), 127));
+        if (nCommand == MIDI_NOTE_ON) {
+            // Velocity humanization
+            float humanVelo = pPattern->getHumanVelo();
+            if (humanVelo > 0.0) {
+                int16_t dvelo = int16_t(humanVelo * d(gen));
+                seqEvent.msg.value2 = int8_t(std::min(std::max(int16_t(m_nEventValue) + dvelo, 0), 127));
+            } else {
+                seqEvent.msg.value2 = m_nEventValue;
+            }
+        } else {
+            seqEvent.msg.value2 = m_nEventValue;
         }
-        seqEvent.msg.value2 = hval2;
-        //fprintf(stderr, "Track::getEvent Scheduled event %x,%u,%u at %u currentTime: %u duration: %u clkperstep: %u sampleperclock: %f event position: %u\n",
-        //		seqEvent.msg.command, seqEvent.msg.value1, seqEvent.msg.value2, seqEvent.time, m_nLastClockTime, pEvent->getDuration(), pPattern->getClocksPerStep(),
-        //		m_dSamplesPerClock, pEvent->getPosition());
+
         return &seqEvent;
     }
     m_nEventValue = -1;
@@ -239,7 +376,7 @@ SEQ_EVENT* Track::getEvent() {
 
 uint32_t Track::updateLength() {
     m_nTrackLength = 0;
-    m_bEmpty       = true;
+    m_bEmpty = true;
     for (auto it = m_mPatterns.begin(); it != m_mPatterns.end(); ++it) {
         if (it->first + it->second->getLength() > m_nTrackLength)
             m_nTrackLength = it->first + it->second->getLength();
@@ -253,19 +390,19 @@ uint32_t Track::getLength() { return m_nTrackLength; }
 
 void Track::clear() {
     m_mPatterns.clear();
-    m_nTrackLength       = 0;
-    m_nEventValue        = -1;
+    m_nTrackLength = 0;
+    m_nEventValue = -1;
     m_nCurrentPatternPos = -1;
-    m_nNextEvent         = -1;
-    m_nNextStep          = 0;
-    m_nClkPerStep        = 1;
-    m_nDivCount          = 0;
-    m_bChanged           = true;
+    m_nNextEvent = -1;
+    m_nNextStep = 0;
+    m_nClkPerStep = 1;
+    m_nDivCount = 0;
+    m_bChanged = true;
 }
 
 void Track::setPosition(uint32_t position) {
-    m_nDivCount  = 0;
-    m_nNextStep  = position / m_nClkPerStep;
+    m_nDivCount = 0;
+    m_nNextStep = position / m_nClkPerStep;
     // fprintf(stderr, "setPosition: next step: %d\n", m_nNextStep);
     m_nNextEvent = -1; // Avoid playing wrong pattern
     for (auto it = m_mPatterns.begin(); it != m_mPatterns.end(); ++it) {
@@ -299,10 +436,10 @@ void Track::solo(bool solo) { m_bSolo = solo; }
 bool Track::isSolo() { return m_bSolo; }
 
 void Track::mute(bool mute) {
-    m_bMute              = mute;
-    m_nEventValue        = -1;
+    m_bMute = mute;
+    m_nEventValue = -1;
     m_nCurrentPatternPos = -1;
-    m_nNextEvent         = -1;
+    m_nNextEvent = -1;
 }
 
 bool Track::isMuted() { return m_bMute; }

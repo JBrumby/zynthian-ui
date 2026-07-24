@@ -3,9 +3,9 @@
 # ******************************************************************************
 # ZYNTHIAN PROJECT: Zynthian GUI
 #
-# Zynthian GUI Main Menu Class
+# Zynthian GUI Main Menu Grid Class
 #
-# Copyright (C) 2015-2023 Fernando Moyano <jofemodo@zynthian.org>
+# Copyright (C) 2025 Fernando Moyano <jofemodo@zynthian.org>
 #
 # ******************************************************************************
 #
@@ -23,180 +23,189 @@
 #
 # ******************************************************************************
 
-import logging
+from time import sleep
 
-# Zynthian specific modules
-from zyngui.zynthian_gui_selector_info import zynthian_gui_selector_info
-
-# ------------------------------------------------------------------------------
-# Zynthian App Selection GUI Class
-# ------------------------------------------------------------------------------
+from zyngui import zynthian_gui_config
+from zyngui.zynthian_gui_selector_grid import zynthian_gui_selector_grid
 
 
-class zynthian_gui_main_menu(zynthian_gui_selector_info):
-
+class zynthian_gui_main_menu(zynthian_gui_selector_grid):
+    """
+    Fast menu presented as a grid of buttons.
+    """
     def __init__(self):
-        super().__init__('Menu')
+        super().__init__()
 
-    def fill_list(self):
-        self.list_data = []
 
-        # Chain & Sequence Management
-        try:
-            self.zyngui.chain_manager.get_next_free_mixer_chan()
-            mixer_avail = True
-        except:
-            mixer_avail = False
-        self.list_data.append((None, 0, "> ADD CHAIN"))
-        if mixer_avail:
-            self.list_data.append((self.add_synth_chain, 0,
-                                   "Add Instrument Chain",
-                                   ["Create a new chain with a MIDI-controlled synth engine. The chain receives MIDI input and generates audio output.",
-                                    "midi_instrument.png"]))
-            self.list_data.append((self.add_audiofx_chain, 0,
-                                   "Add Audio Chain",
-                                   ["Create a new chain for audio FX processing. The chain receives audio input and generates audio output.",
-                                    "microphone.png"]))
-        self.list_data.append((self.add_midifx_chain, 0,
-                               "Add MIDI Chain",
-                               ["Create a new chain for MIDI processing. The chain receives MIDI input and generates MIDI output.",
-                                "midi_logo.png"]))
-        if mixer_avail:
-            self.list_data.append((self.add_midiaudiofx_chain, 0,
-                                   "Add MIDI+Audio Chain",
-                                   ["Create a new chain for combined audio + MIDI processing. The chain receives audio & MIDI input and generates audio & MIDI output. Use it with vocoders, autotune, etc.",
-                                    "midi_audio.png"]))
-            self.list_data.append((self.add_generator_chain, 0,
-                                   "Add Audio Generator Chain",
-                                   ["Create a new chain for audio generation. The chain doesn't receive any input and generates audio output. Internet radio, test signals, etc.",
-                                   "audio_generator.png"]))
-            self.list_data.append((self.add_special_chain, 0,
-                                   "Add Special Chain",
-                                   ["Create a new chain for special processing. The chain receives audio & MIDI input and generates audio & MIDI output. use it for MOD-UI, puredata, etc.",
-                                   "special_chain.png"]))
+        self.title = "Main Menu"
 
-        self.list_data.append((None, 0, "> REMOVE"))
-        self.list_data.append((self.remove_sequences, 0,
-                               "Remove Sequences",
-                               ["Clean all sequencer data while keeping existing chains.",
-                                "delete_sequences.png"]))
-        self.list_data.append((self.remove_chains, 0,
-                               "Remove Chains",
-                               ["Clean all chains while keeping sequencer data.",
-                               "delete_chains.png"]))
-        self.list_data.append((self.remove_all, 0,
-                               "Remove All",
-                               ["Clean all chains and sequencer data. Start from scratch!",
-                               "delete_all.png"]))
+    def build_view(self):
+        if zynthian_gui_config.check_wiring_layout(("V5", "Z2") or zynthian_gui_config.screen_width < 480):
+            self.columns = 3
+            self.config = [{
+                "title": "Add\nChain",
+                "icon": "add_chain.png",
+                "action": self.zyngui.cuia_add_chain
+            }, {
+                "title": "Chain\nManager",
+                "icon": "chain_manager.png",
+                "action": self.zyngui.cuia_screen_chain_manager
+            }, {
+                "title": "Clean",
+                "icon": "delete.png",
+                "action": self.clean
+            }, {
+                "title": "MIDI\nInput",
+                "icon": "midi_input.png",
+                "action": self.zyngui.midi_in_config
+            }, {
+                "title": "MIDI\nOutput",
+                "icon": "midi_output.png",
+                "action": self.zyngui.midi_in_config
+            }, {
+                "title": "Recorder",
+                "icon": "recorder.png",
+                "action": self.recorder_menu
+            }, {
+                "title": "Admin",
+                "icon": "settings.png",
+                "action": self.zyngui.cuia_screen_admin
+            }, {
+                "title": "Capturing\nWorkflow" if self.zyngui.capture_log_fname else "Capture\nWorkflow",
+                "icon": "capturing.png" if self.zyngui.capture_log_fname else "capture.png",
+                "action": self.toggle_capture_log
+            }, {
+                "title": "Power",
+                "icon": "poweroff.png",
+                "action": self.zyngui.cuia_power
+            }]
+        else:
+            self.columns = 4
+            self.config = [{
+                "title": "Add\nChain",
+                "icon": "add_chain.png",
+                "action": self.zyngui.cuia_add_chain
+            }, {
+                "title": "Chain\nManager",
+                "icon": "chain_manager.png",
+                "action": self.zyngui.cuia_screen_chain_manager
+            }, {
+                "title": "Snapshots",
+                "icon": "snapshot.png",
+                "action": self.zyngui.cuia_screen_snapshot
+            }, {
+                "title": "Clean",
+                "icon": "delete.png",
+                "action": self.clean
+            },
 
-        # Add list of Apps
-        self.list_data.append((None, 0, "> MAIN"))
-        self.list_data.append((self.snapshots, 0, "Snapshots", ["Show snapshots management menu.", "snapshot.png"]))
-        self.list_data.append((self.step_sequencer, 0, "Sequencer", ["Show sequencer's zynpad view.", "sequencer.png"]))
-        self.list_data.append((self.audio_recorder, 0, "Audio Recorder", ["Show audio recorder/player.", "audio_recorder.png"]))
-        self.list_data.append((self.midi_recorder, 0, "MIDI Recorder", ["Show SMF recorder/player.", "midi_recorder.png"]))
-        self.list_data.append((self.tempo_settings, 0, "Tempo Settings", ["Show tempo & sync options.", "metronome.png"]))
-        self.list_data.append((self.audio_levels, 0, "Audio Levels", ["Show audio levels view.", "meters.png"]))
-        self.list_data.append((self.audio_mixer_learn, 0, "Mixer Learn", ["Enter mixer's MIDI learn mode", "mixer.png"]))
+            {
+                "title": "MIDI\nIN",
+                "icon": "midi_input.png",
+                "action": self.zyngui.midi_in_config
+            }, {
+                "title": "MIDI\nOUT",
+                "icon": "midi_output.png",
+                "action": self.zyngui.midi_in_config
+            }, {
+                "title": "Tempo",
+                "icon": "metronome.png",
+                "action": self.zyngui.cuia_tempo
+            }, {
+                "title": "ZS3s",
+                "icon": "zs3.png",
+                "action": self.zyngui.cuia_screen_zs3
+            },
 
-        # Add list of System / configuration views
-        self.list_data.append((None, 0, "> SYSTEM"))
-        self.list_data.append((self.admin, 0, "Admin", ["Show admin menu.", "settings.png"]))
-        self.list_data.append(
-            (self.all_sounds_off, 0, "PANIC! All Sounds Off", ["Stop all notes and sequences.", "panic.png"]))
+            {
+                "title": "Audio\nLevels",
+                "icon": "audio_options.png",
+                "action": self.zyngui.cuia_screen_alsa_mixer
+            }, {
+                "title": "Audio\nPlayer",
+                "icon": "audio_recorder.png",
+                "action": self.zyngui.cuia_screen_audio_player
+            }, {
+                "title": "MIDI\nPlayer",
+                "icon": "midi_recorder.png",
+                "action": self.zyngui.cuia_screen_midi_recorder
+            }, {
+                "title": "Capturing\nWorkflow" if self.zyngui.capture_log_fname else "Capture\nWorkflow",
+                "icon": "capturing.png" if self.zyngui.capture_log_fname else "capture.png",
+                "action": self.toggle_capture_log
+            },
 
-        super().fill_list()
+            {
+                "title": "Admin",
+                "icon": "settings.png",
+                "action": self.zyngui.cuia_screen_admin
+            },
+            None,
+            None,
+            {
+                "title": "Power",
+                "icon": "poweroff.png",
+                "action": self.zyngui.cuia_power
+            }]
+        return super().build_view()
 
-    def select_action(self, i, t='S'):
-        if self.list_data[i][0]:
-            self.last_action = self.list_data[i][0]
-            self.last_action(t)
+    def clean(self):
+        self.zyngui.screens["grid_sel"].setup("Confirm Clean", [
+                { "icon": "delete_chains.png", "title": "Clean All Chains", "action": self.clean_chains_confirmed },
+                { "icon": "delete_sequences.png", "title": "Clean All Sequences", "action": self.clean_sequences_confirmed },
+                { "icon": "delete_all.png", "title": "Clean All Chains & Sequences", "action": self.clean_all_confirmed },
+                None, None, None,
+                { "icon": "cancel.png", "title": "Cancel", "action": self.zyngui.close_screen }
+            ], cols=3, select=2)
+        self.zyngui.show_screen("grid_sel")
 
-    def add_synth_chain(self, t='S'):
-        self.zyngui.modify_chain(
-            {"type": "MIDI Synth", "midi_thru": False, "audio_thru": False})
-
-    def add_audiofx_chain(self, t='S'):
-        self.zyngui.modify_chain(
-            {"type": "Audio Effect", "midi_thru": False, "audio_thru": True})
-
-    def add_midifx_chain(self, t='S'):
-        self.zyngui.modify_chain(
-            {"type": "MIDI Tool", "midi_thru": True, "audio_thru": False})
-
-    def add_midiaudiofx_chain(self, t='S'):
-        self.zyngui.modify_chain(
-            {"type": "Audio Effect", "midi_thru": True, "audio_thru": True})
-
-    def add_generator_chain(self, t='S'):
-        self.zyngui.modify_chain(
-            {"type": "Audio Generator", "midi_thru": False, "audio_thru": False})
-
-    def add_special_chain(self, t='S'):
-        self.zyngui.modify_chain(
-            {"type": "Special", "midi_thru": True, "audio_thru": True})
-
-    def snapshots(self, t='S'):
-        logging.info("Snapshots")
-        self.zyngui.show_screen("snapshot")
-
-    def remove_all(self, t='S'):
-        self.zyngui.show_confirm(
-            "Do you really want to remove ALL chains & sequences?", self.remove_all_confirmed)
-
-    def remove_all_confirmed(self, params=None):
-        self.index = 0
-        self.zyngui.clean_all()
-
-    def remove_chains(self, t='S'):
-        self.zyngui.show_confirm(
-            "Do you really want to remove ALL chains?", self.remove_chains_confirmed)
-
-    def remove_chains_confirmed(self, params=None):
-        self.index = 0
+    def clean_chains_confirmed(self, params=None):
         self.zyngui.clean_chains()
+        self.zyngui.show_screen_reset('mixer')
 
-    def remove_sequences(self, t='S'):
-        self.zyngui.show_confirm(
-            "Do you really want to remove ALL sequences?", self.remove_sequences_confirmed)
-
-    def remove_sequences_confirmed(self, params=None):
-        self.index = 0
+    def clean_sequences_confirmed(self, params=None):
         self.zyngui.clean_sequences()
+        self.zyngui.show_screen_reset('launcher')
 
-    def step_sequencer(self, t='S'):
-        logging.info("Step Sequencer")
-        self.zyngui.show_screen('zynpad')
+    def clean_all_confirmed(self, params=None):
+        self.zyngui.clean_all()
+        self.zyngui.show_screen_reset('root')
 
-    def audio_recorder(self, t='S'):
-        logging.info("Audio Recorder/Player")
-        self.zyngui.show_screen("audio_player")
+    def recorder_menu(self, select=0):
+        self.zyngui.screens["grid_sel"].setup("Recorder", [
+            {
+                "icon": "audio_recording.png" if self.state_manager.audio_recorder.status else "audio_recorder.png",
+                "title": "Stop Audio\nRecording" if self.state_manager.audio_recorder.status else "Start Audio\nRecording",
+                "action": self.toggle_audio_record
+            }, {
+                "icon": "folder_audio.png",
+                "title": "Audio\nPlayer",
+                "action": self.zyngui.cuia_audio_file_list
+            }, {
+                "icon": "midi_recording.png" if self.state_manager.status_midi_recorder else "midi_recorder.png",
+                "title": "Stop MIDI\nRecording" if self.state_manager.status_midi_recorder else "Start MIDI\nRecording",
+                "action": self.toggle_midi_record
+            }, {
+                "icon": "folder_midi.png",
+                "title": "MIDI\nPlayer",
+                "action": self.zyngui.cuia_screen_midi_recorder
+            }
+            ], cols=2, select=select)
+        self.zyngui.show_screen("grid_sel")
 
-    def midi_recorder(self, t='S'):
-        logging.info("MIDI Recorder/Player")
-        self.zyngui.show_screen("midi_recorder")
+    def toggle_audio_record(self):
+        self.zyngui.cuia_toggle_audio_record()
+        self.recorder_menu(select=0)
 
-    def audio_mixer_learn(self, t='S'):
-        logging.info("Audio Mixer Learn")
-        self.zyngui.screens["audio_mixer"].midi_learn_menu()
+    def toggle_midi_record(self):
+        self.zyngui.cuia_toggle_midi_record()
+        sleep(0.2)
+        self.recorder_menu(select=2)
 
-    def audio_levels(self, t='S'):
-        logging.info("Audio Levels")
-        self.zyngui.show_screen("alsa_mixer")
-
-    def tempo_settings(self, t='S'):
-        logging.info("Tempo Settings")
-        self.zyngui.show_screen("tempo")
-
-    def admin(self, t='S'):
-        logging.info("Admin")
-        self.zyngui.show_screen("admin")
-
-    def all_sounds_off(self, t='S'):
-        logging.info("All Sounds Off")
-        self.zyngui.callable_ui_action("all_sounds_off")
-
-    def set_select_path(self):
-        self.select_path.set("Main")
-
-# ------------------------------------------------------------------------------
+    def toggle_capture_log(self):
+        if self.zyngui.capture_log_fname:
+            self.zyngui.stop_capture_log()
+            self.build_view()
+        else:
+            self.zyngui.start_capture_log()
+            self.zyngui.close_screen()

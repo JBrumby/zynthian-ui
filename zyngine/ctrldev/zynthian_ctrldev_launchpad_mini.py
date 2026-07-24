@@ -27,10 +27,10 @@
 import logging
 
 # Zynthian specific modules
-from zyngine.ctrldev.zynthian_ctrldev_base import zynthian_ctrldev_zynpad
-from zyngine.zynthian_signal_manager import zynsigman
-from zyncoder.zyncore import lib_zyncore
 from zynlibs.zynseq import zynseq
+from zyncoder.zyncore import lib_zyncore
+from zyngine.zynthian_chain_manager import MAX_NUM_MIDI_CHANS
+from zyngine.ctrldev.zynthian_ctrldev_base import zynthian_ctrldev_zynpad
 
 # ------------------------------------------------------------------------------------------------------------------
 # Novation Launchpad Mini MK1
@@ -40,6 +40,8 @@ from zynlibs.zynseq import zynseq
 class zynthian_ctrldev_launchpad_mini(zynthian_ctrldev_zynpad):
 
     dev_ids = ["Launchpad Mini IN 1"]
+    driver_name = "Launchpad Mini"
+    driver_description = "Interface Novation Launchpad Mini with launcher."
 
     OFF_COLOUR = 0xC		 # Light Off
     PLAYING_COLOUR = 0x3C    # Solid Green
@@ -50,80 +52,62 @@ class zynthian_ctrldev_launchpad_mini(zynthian_ctrldev_zynpad):
     STOPPING_COLOUR = 0x0B   # Blinking Red
     ACTIVE_COLOUR = 0x3C     # Solid Green
 
+    def init(self):
+        super().init()
+        # Configure blinking LEDs
+        lib_zyncore.dev_send_ccontrol_change(self.idev_out, 0, 0, 0x28)
+
+    def end(self):
+        super().end()
+
     def get_note_xy(self, note):
         row = note // 16
         col = note % 16
         return col, row
 
-    def init(self):
-        super().init()
-        zynsigman.register_queued(
-            zynsigman.S_CHAIN_MAN, self.chain_manager.SS_SET_ACTIVE_CHAIN, self.update_active_chain)
-        # Configure blinking LEDs
-        lib_zyncore.dev_send_ccontrol_change(self.idev_out, 0, 0, 0x28)
-
-    def end(self):
-        zynsigman.unregister(
-            zynsigman.S_CHAIN_MAN, self.chain_manager.SS_SET_ACTIVE_CHAIN, self.update_active_chain)
-        super().end()
-
-    def refresh(self):
-        super().refresh()
-        self.update_active_chain()
-
-    def update_active_chain(self, active_chain=None):
+    def on_active_chain(self, active_chain_id=None):
         if self.idev_out is None:
             return
-        if active_chain is None:
-            active_chain = self.chain_manager.active_chain_id
+        if active_chain_id is None:
+            active_chain_id = self.chain_manager.active_chain.chain_id
         for col in range(self.cols):
             chain_id = self.chain_manager.get_chain_id_by_index(col)
-            if chain_id and chain_id == active_chain:
+            if chain_id and chain_id == active_chain_id:
                 light = self.ACTIVE_COLOUR
             else:
                 light = self.OFF_COLOUR
-            lib_zyncore.dev_send_ccontrol_change(
-                self.idev_out, 0, 104 + col, light)
+            lib_zyncore.dev_send_ccontrol_change(self.idev_out, 0, 104 + col, light)
 
-    def update_seq_bank(self):
-        if self.idev_out is None:
-            return
-        # logging.debug("Updating Launchpad MINI bank leds")
-        col = 8
-        for row in range(self.rows):
-            note = 16 * row + col
-            if row == self.zynseq.bank - 1:
-                lib_zyncore.dev_send_note_on(
-                    self.idev_out, 0, note, self.ACTIVE_COLOUR)
+    def update_pad(self, row, col, pad_info):
+        note = 16 * row + col
+        midi_chan = 0
+        vel = self.OFF_COLOUR
+        try:
+            state = pad_info["state"]
+            if col == self.cols:
+                group = 32
             else:
-                lib_zyncore.dev_send_note_on(
-                    self.idev_out, 0, note, self.OFF_COLOUR)
+                group = pad_info["group"]
+            if pad_info["repeat"] == 0 or group > MAX_NUM_MIDI_CHANS:
+                pass
+            elif state == zynseq.SEQ_STOPPED:
+                if not pad_info["empty"]:
+                    vel = self.STOPPED_COLOUR
+            elif state == zynseq.SEQ_PLAYING:
+                vel = self.PLAYING_COLOUR
+            elif state == zynseq.SEQ_STOPPING:
+                vel = self.STOPPING_COLOUR
+            elif state == zynseq.SEQ_STARTING:
+                vel = self.STARTING_COLOUR
+            else:
+                vel = self.OFF_COLOUR
+        except:
+            pass
+        lib_zyncore.dev_send_note_on(self.idev_out, midi_chan, note, vel)
 
-    def update_seq_state(self, bank, seq, state, mode, group):
-        if self.idev_out is None or bank != self.zynseq.bank:
-            return
-        # logging.debug("Updating Launchpad MINI pad {}".format(seq))
-        col, row = self.zynseq.get_xy_from_pad(seq)
-        note = 16 * row + col
-        chan = 0
-        if mode == 0:
-            vel = self.OFF_COLOUR
-        elif state == zynseq.SEQ_STOPPED:
-            vel = self.STOPPED_COLOUR
-        elif state == zynseq.SEQ_PLAYING:
-            vel = self.PLAYING_COLOUR
-        elif state == zynseq.SEQ_STOPPING:
-            vel = self.STOPPING_COLOUR
-        elif state == zynseq.SEQ_STARTING:
-            vel = self.STARTING_COLOUR
-        else:
-            vel = self.OFF_COLOUR
-        lib_zyncore.dev_send_note_on(self.idev_out, chan, note, vel)
-
-    # Light-Off the pad specified with column & row
-    def pad_off(self, col, row):
-        note = 16 * row + col
-        lib_zyncore.dev_send_note_on(self.idev_out, 0, note, 0xC)
+    def refresh(self):
+        super().refresh()
+        self.on_active_chain()
 
     def midi_event(self, ev):
         # logging.debug("Launchpad MINI MIDI handler => {}".format(ev))
@@ -131,15 +115,17 @@ class zynthian_ctrldev_launchpad_mini(zynthian_ctrldev_zynpad):
         if evtype == 0x9:
             note = ev[1] & 0x7F
             col, row = self.get_note_xy(note)
-            # scene change
             if col == 8:
-                self.zynseq.select_bank(row + 1)
-                return True
-            # launch/stop pad
-            pad = self.zynseq.get_pad_from_xy(col, row)
-            if pad >= 0:
-                self.zynseq.libseq.togglePlayState(self.zynseq.bank, pad)
-                return True
+                midi_chan = zynseq.PHRASE_CHANNEL
+            else:
+                midi_chan = self.get_filtered_midi_chan_by_index(col)
+            if midi_chan is not None:
+                phrase = row + self.scroll_v
+                try:
+                    self.zynseq.libseq.togglePlayState(self.zynseq.scene, phrase, midi_chan)
+                except:
+                    pass
+            return True
         elif evtype == 0xB:
             ccnum = ev[1] & 0x7F
             ccval = ev[2] & 0x7F
@@ -148,21 +134,18 @@ class zynthian_ctrldev_launchpad_mini(zynthian_ctrldev_zynpad):
                     self.chain_manager.set_active_chain_by_index(ccnum-104)
                 return True
 
+    # Light-Off the pad specified with column & row
+    def pad_off(self, col, row):
+        note = 16 * row + col
+        lib_zyncore.dev_send_note_on(self.idev_out, 0, note, 0xC)
+
     # Light-Off all LEDs
     def light_off(self):
         for row in range(self.rows):
             for col in range(self.cols + 1):
                 note = 16 * row + col
-                lib_zyncore.dev_send_note_on(
-                    self.idev_out, 0, note, self.OFF_COLOUR)
+                lib_zyncore.dev_send_note_on(self.idev_out, 0, note, self.OFF_COLOUR)
         for col in range(self.cols):
-            lib_zyncore.dev_send_ccontrol_change(
-                self.idev_out, 0, 104 + col, self.OFF_COLOUR)
-
-    def sleep_on(self):
-        self.light_off()
-
-    def sleep_off(self):
-        self.refresh()
+            lib_zyncore.dev_send_ccontrol_change(self.idev_out, 0, 104 + col, self.OFF_COLOUR)
 
 # ------------------------------------------------------------------------------

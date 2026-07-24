@@ -32,11 +32,10 @@ from time import sleep
 from os.path import isfile
 from Levenshtein import distance
 from subprocess import check_output
-from collections import OrderedDict
 
-from . import zynthian_engine_sfz
 from zynconf import ServerPort
 from zyncoder.zyncore import lib_zyncore
+from zyngine.zynthian_engine_sfz import zynthian_engine_sfz
 
 # ------------------------------------------------------------------------------
 # Linuxsampler Exception Classes
@@ -168,7 +167,7 @@ class zynthian_engine_linuxsampler(zynthian_engine_sfz):
             self.state_manager.end_busy("linux_sampler")
             return None
         lines = result.decode().split("\r\n")
-        result = OrderedDict()
+        result = {}
         for line in lines:
             # logging.debug("LSCP RECEIVE => %s" % line)
             if line[0:2] == "OK":
@@ -209,8 +208,14 @@ class zynthian_engine_linuxsampler(zynthian_engine_sfz):
 
     def set_midi_chan(self, processor):
         if processor.ls_chan_info:
-            lib_zyncore.zmop_set_midi_chan_trans(
-                processor.chain.zmop_index, processor.get_midi_chan(), processor.ls_chan_info['midi_chan'])
+            midi_chan = processor.get_midi_chan()
+            if 0 <= midi_chan < 16:
+                lib_zyncore.zmop_set_midi_chan_trans(processor.chain.zmop_index,
+                                                    midi_chan,
+                                                    processor.ls_chan_info['midi_chan'])
+            elif midi_chan == 0xffff:
+                lib_zyncore.zmop_set_midi_chan_all_trans(processor.chain.zmop_index,
+                                                    processor.ls_chan_info['midi_chan'])
 
     # ---------------------------------------------------------------------------
     # Bank Management

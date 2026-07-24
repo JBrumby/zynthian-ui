@@ -1,0 +1,374 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+# ******************************************************************************
+# ZYNTHIAN PROJECT: Zynthian GUI
+#
+# Zynthian GUI Selector Grid Class
+#
+# Copyright (C) 2025-2026 Brian Walton <riban@zynthian.org>
+#
+#
+# ******************************************************************************
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License as
+# published by the Free Software Foundation; either version 2 of
+# the License, or any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# For a full copy of the GNU General Public License see the LICENSE.txt file.
+#
+# ******************************************************************************
+
+import logging
+import tkinter
+from PIL import Image, ImageTk
+
+from zyngui import zynthian_gui_config
+from zyngui.zynthian_gui_base import zynthian_gui_base
+
+
+class zynthian_gui_selector_grid(zynthian_gui_base):
+    """
+    Selector presented as a grid of buttons.
+    """
+    def __init__(self, default_icon="zynthian_logo.png"):
+        """
+        Initialize the Grid View.
+
+        Sets up the canvas, data structures for nodes and grid navigation,
+        and initializes mouse drag state variables.
+        """
+        super().__init__()
+
+        self.default_icon = default_icon
+        self.columns = 3
+
+        # Initial values, recalculated by update_layout
+        self.BLOCK_WIDTH = 120  # Width of each processor block in pixels
+        self.BLOCK_HEIGHT = 40  # Height of each processor block in pixels
+        self.SPACING = 10  # Horizontal spacing between processor blocks in pixels
+        self.font = (zynthian_gui_config.font_family, int(0.065 * self.BLOCK_WIDTH))
+        self.icon_size = (8, 8)
+
+        self.config = []  # List of dictionaries, each describing a button
+        self.selected_node = 0  # Selected node id
+
+        # Canvas for drawing the graph
+        self.canvas = tkinter.Canvas(self.main_frame, bg=zynthian_gui_config.color_panel_bg, highlightthickness=0)
+        self.canvas.pack(fill=tkinter.BOTH, expand=True)
+        # Bind Mouse Events
+        self.canvas.bind("<Button-1>", self.on_press)
+        self.canvas.bind("<B1-Motion>", self.on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        self.canvas.bind("<Button-4>", self.on_wheel)
+        self.canvas.bind("<Button-5>", self.on_wheel)
+
+        # Mouse Drag State
+        self.drag_start_x = 0
+        self.drag_start_y = 0
+        self.is_dragging = False
+        self.drag_threshold = 5  # pixels to detect drag vs click
+        self.press_event = None
+
+    def update_layout(self):
+        super().update_layout()
+        self.update_geometry()
+        self._draw_nodes()
+
+    def update_geometry(self):
+        # Formula 2 * (x // y) ensures even values which helps with spacing and dividers
+        self.SPACING = 2 * (self.width // (self.columns * 20))
+        self.BLOCK_WIDTH = 2 * ((self.width - self.SPACING) // (self.columns * 2)) - self.SPACING
+        #self.BLOCK_HEIGHT = 2 * (self.BLOCK_WIDTH // 5)
+        self.BLOCK_HEIGHT = 2 * ((self.height - self.SPACING) // (self.columns * 2)) - self.SPACING
+        self.font = (zynthian_gui_config.font_family, int(0.06 * self.BLOCK_WIDTH))
+        icon_h = self.BLOCK_HEIGHT - int(0.5 * self.SPACING)
+        self.icon_size = (icon_h, icon_h)
+
+    def build_view(self):
+        self._draw_nodes()
+        self.set_select_path()
+        return True
+
+    def show(self):
+        if not self.shown:
+            super().show()
+            if self.zyngui.tts:
+                self.zyngui.tts.announce(self.config[self.selected_node]["title"], False, False, False)
+
+    def setup(self, title, config, cols=3, select=0):
+        """
+        Configure the buttons
+        Args:
+            title: Text to show in topbar
+            config: List of dictionaries, each describing a button
+            cols: Quantity of columns (Optional. Default: 3)
+            select: Button to select (Optional. Default: 0)
+        """
+        if cols:
+            self.columns = cols
+        else:
+            self.columns = 3
+        self.update_geometry()
+        self.title = self.tts_title = title
+        self.set_title(self.title)
+        self.config = config
+        self.selected_node = select
+
+    def get_icon(self, icon_fname=None):
+        if not icon_fname:
+            icon_fname = self.default_icon
+        if icon_fname not in self.icons:
+            try:
+                img = Image.open(f"{self.ui_dir}/icons/{icon_fname}")
+                icon = ImageTk.PhotoImage(img.resize(self.icon_size))
+                self.icons[icon_fname] = icon
+                return icon
+            except Exception as e:
+                logging.error(f"Can't load info icon {icon_fname} => {e}")
+                return None
+        else:
+            return self.icons[icon_fname]
+
+    def _draw_nodes(self):
+        if self.width == 1:
+            return # Not yet resized
+        self.canvas.delete("all")
+        self.icons = {}
+        x = self.SPACING
+        y = self.SPACING
+        for idx, node in enumerate(self.config):
+            if node:
+                fill = "#666666" if node["action"] else "#444444"
+                self.canvas.create_rectangle(x, y, x + self.BLOCK_WIDTH, y + self.BLOCK_HEIGHT,
+                    fill=fill,
+                    outline=fill,
+                    tags=("node", f"node_{idx}"))
+                if "icon" in node:
+                    img = self.get_icon(node["icon"])
+                    if img:
+                        self.canvas.create_image(x, y + self.BLOCK_HEIGHT // 2, image=img, anchor="w")
+                fill = "#ffffff" if node["action"] else "#aaaaaa"
+                self.canvas.create_text(
+                    x + 2 * self.BLOCK_WIDTH // 3, y + self.BLOCK_HEIGHT // 2,
+                    text=node["title"],
+                    fill=fill,
+                    font=self.font,
+                    width=self.BLOCK_WIDTH // 2,
+                    justify=tkinter.CENTER
+                )
+            x += self.BLOCK_WIDTH + self.SPACING
+            if x + self.BLOCK_WIDTH + self.SPACING > self.width:
+                x = self.SPACING
+                y += self.BLOCK_HEIGHT + self.SPACING
+
+        # Configure scroll region
+        bbox = self.canvas.bbox("all")
+        if bbox:
+            self.canvas.configure(scrollregion=(bbox[0] - self.SPACING, bbox[1] - self.SPACING, bbox[2] + self.SPACING, bbox[3] + self.SPACING))
+        else:
+            self.canvas.configure(scrollregion=(0, 0, 100, 100))
+
+        self._draw_selection()
+
+    def _draw_selection(self):
+        """
+        Draw selection cursor.
+        """
+        self.canvas.itemconfig("node", outline="")
+        node_tag = f"node_{self.selected_node}"
+        self.canvas.itemconfig(node_tag, outline="yellow", width=2)
+        if self.shown and self.zyngui.tts:
+            self.zyngui.tts.announce(self.config[self.selected_node]["title"])
+
+        #Scroll the canvas to ensure the selected node is visible.
+        # Get node's coords
+        ncoords = self.canvas.bbox(node_tag)
+        bcoords = self.canvas.bbox("all")
+        if not ncoords or not bcoords:
+            return
+        # Get view coords
+        vw = self.width
+        vh = self.height
+        vx0 = self.canvas.canvasx(0)
+        vy0 = self.canvas.canvasy(0)
+        vx1 = self.canvas.canvasx(vw)
+        vy1 = self.canvas.canvasy(vh)
+        w = bcoords[2] - bcoords[0]
+        h = bcoords[3] - bcoords[1]
+        # Scroll horizontally
+        if ncoords[0] < vx0:
+            self.canvas.xview_moveto((ncoords[0] - bcoords[0]) / w)
+        elif ncoords[2] > vx1:
+            self.canvas.xview_moveto((ncoords[2] - vw) / w)
+        # Scroll vertically
+        if ncoords[1] < vy0:
+            self.canvas.yview_moveto((ncoords[1] - bcoords[1]) / h)
+        elif ncoords[3] > vy1:
+            self.canvas.yview_moveto((ncoords[3] - vh) / h)
+
+    def arrow_left(self):
+        """
+        Handle arrow left action.
+        """
+
+        self.select_offset(-1)
+
+    def arrow_right(self):
+        """
+        Handle arrow right action.
+        """
+
+        self.select_offset(1)
+
+    def arrow_up(self):
+        """ Handle arrow up action """
+
+        if super().arrow_up():
+            return True
+        self.select_offset(-self.columns)
+
+    def arrow_down(self):
+        """ Handle arrow down action """
+
+        if super().arrow_down():
+            return
+        self.select_offset(self.columns)
+
+    def select_offset(self, dval):
+        idx = self.selected_node + dval
+        # Skip empty items
+        while 0 < idx < len(self.config) and self.config[idx] is None:
+            idx += dval
+        idx = min(len(self.config) - 1, max(0, idx))
+        if self.config[idx] is None:
+            return
+        self.selected_node = idx
+        self._draw_selection()
+
+    def on_wheel(self, event):
+        """
+        Handle mouse wheel events to navigate the graph.
+
+        Args:
+            event: The mouse wheel event.
+        """
+        if event.num == 5 or event.delta == -120:
+            self.select_offset(1)
+        elif event.num == 4 or event.delta == 120:
+            self.select_offset(-1)
+
+    def zynpot_cb(self, i, dval):
+        if super().zynpot_cb(i, dval):
+            return True
+        if i == 3:
+            self.select_offset(dval)
+            return True
+        elif i == 2:
+            self.select_offset(dval * self.columns)
+
+    def on_press(self, event):
+        """
+        Handle mouse button press. Initializes drag state.
+        Args:
+            event: Mouse event
+        """
+        # Record start position for drag
+        self.drag_start_x = event.x
+        self.drag_start_y = event.y
+        self.start_xview = self.canvas.xview()[0]
+        self.start_yview = self.canvas.yview()[0]
+        self.is_dragging = False
+        self.press_event = event
+
+    def on_drag(self, event):
+        """
+        Handle mouse drag event. Scrolls the canvas.
+        Args:
+            event: Mouse event
+        """
+        # Calculate pixel delta
+        dx = self.drag_start_x - event.x
+        dy = self.drag_start_y - event.y
+
+        # Check threshold
+        if not self.is_dragging:
+            if abs(dx) > self.drag_threshold or abs(dy) > self.drag_threshold:
+                self.is_dragging = True
+
+        if self.is_dragging:
+            # Scroll Canvas manually using moveto
+            # We need the total scrollable size to convert pixels to fraction
+            try:
+                # scrollregion is "x1 y1 x2 y2" string or tuple
+                sr = self.canvas.cget("scrollregion")
+                if isinstance(sr, str):
+                    sr = [float(x) for x in sr.split()]
+                sr_w = sr[2] - sr[0]
+                sr_h = sr[3] - sr[1]
+                can_w = self.canvas.winfo_width()
+                can_h = self.canvas.winfo_height()
+                # Horizontal Move
+                if sr_w > can_w:
+                    d_fract_x = dx / float(sr_w)
+                    self.canvas.xview_moveto(self.start_xview + d_fract_x)
+                # Vertical Move
+                if sr_h > can_h:
+                    d_fract_y = dy / float(sr_h)
+                    self.canvas.yview_moveto(self.start_yview + d_fract_y)
+            except Exception as e:
+                logging.warning(f"Drag scroll error: {e}")
+                pass
+
+    def on_release(self, event):
+        """
+        Handle mouse button release.
+        Args:
+            event: Mouse event
+        """
+        # Use canvasx/y to account for scrolling
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        # Find closest node or clicked node
+        items = self.canvas.find_overlapping(x, y, x, y)
+        try:
+            tags = self.canvas.gettags(items[0])
+            self.selected_node = int(tags[1].split("_")[1])
+        except:
+            return
+        self._draw_selection()
+        press_type = "S"
+        if self.press_event:
+            if event.time > self.press_event.time + 400:
+                press_type = "B"
+            self.press_event = None
+        self.switch_select(press_type)
+
+    def switch_select(self, press_type="S"):
+        config = self.config[self.selected_node]
+        if press_type == "B":
+            action_fn = config.get("bold_action")
+            if action_fn:
+                action_params = config.get("action_bold_params")
+                if action_params:
+                    action_fn(*action_params)
+                else:
+                    action_fn()
+                return
+        action_fn = config.get("action")
+        if action_fn:
+            action_params = config.get("action_params")
+            if action_params:
+                action_fn(*action_params)
+            else:
+                action_fn()
+
+    def set_select_path(self):
+        self.select_path.set(self.title)
+
+    def get_help_fpath(self):
+        return "selector_grid.html"

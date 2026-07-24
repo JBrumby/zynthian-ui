@@ -59,10 +59,15 @@ class RunTimer(Thread):
         self._actions = {}
 
         self.daemon = True
+        self.running = True
         self.start()
 
     def __contains__(self, b):
         return b in self._actions
+
+    def end(self):
+        self.running = False
+        self._awake.set()
 
     def add(self, name, timeout, callback, *args, **kwargs):
         with self._lock:
@@ -81,7 +86,7 @@ class RunTimer(Thread):
             self._actions.pop(name, None)
 
     def run(self):
-        while True:
+        while self.running:
             if not self._actions:
                 self._awake.wait()
             self._awake.clear()
@@ -136,7 +141,7 @@ class IntervalTimer(RunTimer):
             action[1] = timeout
 
     def run(self):
-        while True:
+        while self.running:
             if not self._actions:
                 self._awake.wait()
             self._awake.clear()
@@ -158,7 +163,7 @@ class IntervalTimer(RunTimer):
 
 
 # --------------------------------------------------------------------------
-# A handy timer for triggering short/bold/long push actions
+# A handy timer for triggering short/bold/long press actions
 # --------------------------------------------------------------------------
 class ButtonTimer(Thread):
     def __init__(self, callback):
@@ -169,7 +174,12 @@ class ButtonTimer(Thread):
         self._pressed = {}
 
         self.daemon = True
+        self.running = True
         self.start()
+
+    def end(self):
+        self.running = False
+        self._awake.set()
 
     def is_pressed(self, btn, ts):
         with self._lock:
@@ -183,8 +193,12 @@ class ButtonTimer(Thread):
             elapsed = time.time() - ts
             self._run_callback(btn, elapsed)
 
+    def cancel(self, btn):
+        with self._lock:
+            self._pressed.pop(btn, None)
+
     def run(self):
-        while True:
+        while self.running:
             with self._lock:
                 expired, elapsed = self._get_expired()
             if expired is not None:
@@ -249,9 +263,9 @@ class ModeHandlerBase:
 
     SCREEN_CUIA_MAP = {
         "option":         "MENU",
-        "main_menu":      "MENU",
+        "chain_manager":  "MENU",
         "admin":          "SCREEN_ADMIN",
-        "audio_mixer":    "SCREEN_AUDIO_MIXER",
+        "mixer":          "SCREEN_MIXER",
         "alsa_mixer":     "SCREEN_ALSA_MIXER",
         "control":        "SCREEN_CONTROL",
         "preset":         "PRESET",
@@ -268,13 +282,16 @@ class ModeHandlerBase:
     def __init__(self, state_manager):
         self._state_manager = state_manager
         self._chain_manager = state_manager.chain_manager
-        self._zynmixer = state_manager.zynmixer
         self._zynseq = state_manager.zynseq
 
         self._timer = None
         self._current_screen = None
         self._is_shifted = False
         self._is_active = False
+
+    def __del__(self):
+        if self._timer:
+            self._timer.end()
 
     @property
     def name(self):
@@ -347,8 +364,8 @@ class ModeHandlerBase:
             self._is_shifted = override
 
     # FIXME: Could this be in chain_manager?
-    def _get_chain_id_by_sequence(self, bank, seq):
-        channel = self._libseq.getChannel(bank, seq, 0)
+    def _get_chain_id_by_sequence(self, phrase, seq):
+        channel = self._libseq.getChannel(self._zynseq.scene, phrase, seq, 0)
         return next(
             (id for id, c in self._chain_manager.chains.items()
              if c.midi_chan == channel),
@@ -356,34 +373,34 @@ class ModeHandlerBase:
         )
 
     # FIXME: Could this (or part of this) be in libseq?
-    def _get_sequence_patterns(self, bank, seq, create=False):
-        seq_len = self._libseq.getSequenceLength(bank, seq)
+    def _get_sequence_patterns(self, phrase, midi_chan, create=False):
+        seq_len = self._libseq.getSequenceLength(self._zynseq.scene, phrase, midi_chan)
         pattern = -1
         retval = []
 
         if seq_len == 0:
             if create:
                 pattern = self._libseq.createPattern()
-                self._libseq.addPattern(bank, seq, 0, 0, pattern)
+                self._libseq.addPattern(self._zynseq.scene, phrase, midi_chan, 0, 0, pattern)
                 retval.append(pattern)
             return retval
 
-        n_tracks = self._libseq.getTracksInSequence(bank, seq)
+        n_tracks = self._libseq.getTracksInSequence(self._zynseq.scene, phrase, midi_chan)
         for track in range(n_tracks):
-            retval.extend(self._get_patterns_in_track(bank, seq, track))
+            retval.extend(self._get_patterns_in_track(phrase, midi_chan, track))
         return retval
 
     # FIXME: Could this be in libseq?
-    def _get_patterns_in_track(self, bank, seq, track):
+    def _get_patterns_in_track(self, phrase, seq, track):
         retval = []
-        n_patts = self._libseq.getPatternsInTrack(bank, seq, track)
+        n_patts = self._libseq.getPatternsInTrack(self._zynseq.scene, phrase, seq, track)
         if n_patts == 0:
             return retval
 
-        seq_len = self._libseq.getSequenceLength(bank, seq)
+        seq_len = self._libseq.getSequenceLength(self._zynseq.scene, phrase, seq)
         pos = 0
         while pos < seq_len:
-            pattern = self._libseq.getPatternAt(bank, seq, track, pos)
+            pattern = self._libseq.getPatternAt(self._zynseq.scene, phrase, seq, track, pos)
             if pattern != -1:
                 retval.append(pattern)
                 pos += self._libseq.getPatternLength(pattern)
@@ -393,27 +410,27 @@ class ModeHandlerBase:
         return retval
 
     # FIXME: Could this be in libseq?
-    def _add_pattern_to_end_of_track(self, bank, seq, track, pattern):
+    def _add_pattern_to_end_of_track(self, phrase, seq, track, pattern):
         pos = 0
-        if self._libseq.getTracksInSequence(bank, seq) != 0:
-            pos = self._libseq.getSequenceLength(bank, seq)
+        if self._libseq.getTracksInSequence(self._zynseq.scene, phrase, seq) != 0:
+            pos = self._libseq.getSequenceLength(self._zynseq.scene, phrase, seq)
             while pos > 0:
                 # Arranger's offset step is a quarter note (24 clocks)
-                if self._libseq.getPatternAt(bank, seq, track, pos - 24) != -1:
+                if self._libseq.getPatternAt(self._zynseq.scene, phrase, seq, track, pos - 24) != -1:
                     break
                 pos -= 24
 
-        return self._libseq.addPattern(bank, seq, track, pos, pattern)
+        return self._libseq.addPattern(self._zynseq.scene, phrase, seq, track, pos, pattern)
 
     # FIXME: Could this be in libseq?
     def _set_note_duration(self, step, note, duration):
         velocity = self._libseq.getNoteVelocity(step, note)
-        stutt_count = self._libseq.getStutterCount(step, note)
-        stutt_duration = self._libseq.getStutterDur(step, note)
+        stutt_speed = self._libseq.getNoteStutterSpeed(step, note)
+        stutt_velfx = self._libseq.getNoteStutterVelfx(step, note)
         self._libseq.removeNote(step, note)
         self._libseq.addNote(step, note, velocity, duration, 0)
-        self._libseq.setStutterCount(step, note, stutt_count)
-        self._libseq.setStutterDur(step, note, stutt_duration)
+        self._libseq.setNoteStutterSpeed(step, note, stutt_speed)
+        self._libseq.setNoteStutterVelfx(step, note, stutt_velfx)
 
     def _show_screen_briefly(self, screen, cuia, timeout):
         # Only created when/if needed
@@ -425,7 +442,7 @@ class ModeHandlerBase:
 
         # If screen is audio mixer, there is no 'back', so try to get the screen
         # name. Not all screens may be mapped, so it will fail there (only corner-cases).
-        if screen == "audio_mixer":
+        if screen == "mixer":
             prev_screen = self.SCREEN_CUIA_MAP.get(
                 self._current_screen, "BACK")
 

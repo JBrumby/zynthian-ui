@@ -35,6 +35,7 @@ from select import select
 from time import monotonic
 from threading import Thread
 from subprocess import run, PIPE
+from tkinterweb import HtmlFrame
 from dataclasses import dataclass
 from collections import namedtuple
 from evdev import ecodes, InputDevice
@@ -88,7 +89,7 @@ class Touch(object):
 
     @property
     def position(self):
-        """Current position of touch event  as tuple (x,y)"""
+        """Current position of touch event as tuple (x,y)"""
 
         return (self.x, self.y)
 
@@ -181,15 +182,17 @@ class MultiTouch(object):
     EVENT_FORMAT = str('llHHi')
     EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
 
-    def __init__(self, invert_x_axis=False, invert_y_axis=False):
+    def __init__(self, state_manager, invert_x_axis=False, invert_y_axis=False):
         """Instantiate the touch driver
 
         Creates an instance of the driver attached to the first multitouch hardware discovered.
 
+        state_manager - State Manager object used for disabling powersave mode
         invert_x_axis - True to invert x axis (optional)
         invert_y_axis - True to invert y axis (optional)
         """
 
+        self.state_manager = state_manager
         self._running = False  # True when thread is running
         self.thread = None  # Background thread processing touch events
         self._invert_x = invert_x_axis
@@ -270,6 +273,8 @@ class MultiTouch(object):
                 # Touchscreen driver may have been unloaded so stop thread and enable detection of multitouch (on next xinput touch event)
                 logging.info(f"Multitouch device {self.device_name} disconnected")
                 break
+            except Exception as e:
+                logging.warning(e)
         self.detect = True
 
     def __enter__(self):
@@ -332,6 +337,9 @@ class MultiTouch(object):
         """
 
         now = int(monotonic() * 1000)
+        if self.state_manager.power_save_mode:
+            self.state_manager.set_event_flag()
+            return
         for event in self.events:
             try:
                 event.x = event.x_root - event.offset_x
@@ -344,10 +352,13 @@ class MultiTouch(object):
 
             if event._type == MultitouchTypes.MULTI_PRESS:
                 # Find a widget for the touch event
-                event.widget = zynthian_gui_config.top.winfo_containing(event.x_root, event.y_root)
+                try:
+                    event.widget = zynthian_gui_config.top.winfo_containing(event.x_root, event.y_root)
+                except:
+                    event.widget = None
                 if event.widget is None:
                     gui_obj = zynthian_gui_config.zyngui.get_current_screen_obj()
-                    if isinstance(gui_obj, tkinter.Frame):
+                    if isinstance(gui_obj, tkinter.Frame) or isinstance(gui_obj, HtmlFrame):
                         event.widget = gui_obj
                         #logging.debug("Using current screen object for touch event")
                     else:
@@ -373,8 +384,7 @@ class MultiTouch(object):
                     # First touch so wait to see if another touch event arrives to start a gesture
                     event._type = MultitouchTypes.GESTURE_PRESS
                     self._g_pending = event
-                    self._g_timeout = zynthian_gui_config.top.after(
-                        100, self._on_touch_timeout)
+                    self._g_timeout = zynthian_gui_config.top.after(100, self._on_touch_timeout)
 
             elif event._type == MultitouchTypes.MULTI_RELEASE:
                 if self._g_pending:
@@ -437,22 +447,18 @@ class MultiTouch(object):
                 event._type = MultitouchTypes.IDLE
 
             elif event._type == MultitouchTypes.GESTURE_H_PINCH:
-                pinch = abs(event.x - event.gest_pair.x) - \
-                    abs(event.last_x - event.gest_pair.last_x)
+                pinch = abs(event.x - event.gest_pair.x) - abs(event.last_x - event.gest_pair.last_x)
                 # logging.warning(f"H-pinch {pinch}")
                 for ev_handler in self._on_gesture:
                     if ev_handler.widget == None or ev_handler.widget == event.widget:
-                        ev_handler.function(
-                            MultitouchTypes.GESTURE_H_PINCH, pinch)
+                        ev_handler.function(MultitouchTypes.GESTURE_H_PINCH, pinch)
 
             elif event._type == MultitouchTypes.GESTURE_V_PINCH:
-                pinch = abs(event.y - event.gest_pair.y) - \
-                    abs(event.last_y - event.gest_pair.last_y)
+                pinch = abs(event.y - event.gest_pair.y) - abs(event.last_y - event.gest_pair.last_y)
                 # logging.warning(f"V-pinch {pinch}")
                 for ev_handler in self._on_gesture:
                     if ev_handler.widget == None or ev_handler.widget == event.widget:
-                        ev_handler.function(
-                            MultitouchTypes.GESTURE_V_PINCH, pinch)
+                        ev_handler.function(MultitouchTypes.GESTURE_V_PINCH, pinch)
 
             elif event._type == MultitouchTypes.GESTURE_H_DRAG:
                 if event.slot > event.gest_pair.slot:
@@ -460,8 +466,7 @@ class MultiTouch(object):
                     # logging.warning(f"H-drag {drag}")
                     for ev_handler in self._on_gesture:
                         if ev_handler.widget == None or ev_handler.widget == event.widget:
-                            ev_handler.function(
-                                MultitouchTypes.GESTURE_H_DRAG, drag)
+                            ev_handler.function(MultitouchTypes.GESTURE_H_DRAG, drag)
 
             elif event._type == MultitouchTypes.GESTURE_V_DRAG:
                 if event.slot > event.gest_pair.slot:
@@ -469,8 +474,7 @@ class MultiTouch(object):
                     # logging.warning(f"V-drag {drag}")
                     for ev_handler in self._on_gesture:
                         if ev_handler.widget == None or ev_handler.widget == event.widget:
-                            ev_handler.function(
-                                MultitouchTypes.GESTURE_V_DRAG, drag)
+                            ev_handler.function(MultitouchTypes.GESTURE_V_DRAG, drag)
 
             elif event._type == MultitouchTypes.SINGLE_RELEASE:
                 if event.widget:
@@ -563,7 +567,7 @@ class MultiTouch(object):
 
         widget - Canvas widget
         tagOrId - Tag or object ID to bind event to
-        sequence - Event sequence to bind ["press" "motion" | "release" | "horizontal_drag"]
+        sequence - Event sequence to bind ["press" | "motion" | "release" | "horizontal_drag"]
         function - Callback function
         add - True to append the binding otherwise remove existing bindings (default)
 
@@ -596,7 +600,7 @@ class MultiTouch(object):
 
         widget - Canvas widget
         tagOrId - Tag or object ID to bind event to
-        sequence - Event sequence to bind ["press" "motion" | "release" | "horizontal_drag"]
+        sequence - Event sequence to bind ["press" | "motion" | "release" | "horizontal_drag"]
         function - Callback function (Optional - default None=remove all bindings)
         """
 

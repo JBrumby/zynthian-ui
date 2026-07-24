@@ -32,12 +32,12 @@ import logging
 import requests
 from time import sleep
 from xml.etree import ElementTree
-from collections import OrderedDict
-from subprocess import Popen, DEVNULL, PIPE, check_output, run
+from subprocess import Popen, PIPE, check_output
 
-from . import zynthian_engine
-from . import zynthian_controller
 from zynconf import ServerPort
+from zyngine.zynthian_engine import zynthian_engine
+from zyngine.zynthian_controller import zynthian_controller
+
 
 """ Map of parameters to expose in UI
     0: Symbol used in MIDI mapping file
@@ -582,7 +582,7 @@ class zynthian_engine_pianoteq(zynthian_engine):
         try:
             sr = self.state_manager.get_jackd_samplerate()
         except:
-            sr = 44100
+            sr = 48000
         fix_pianoteq_config(sr)
         super().start()  # TODO: Use lightweight Popen - last attempt stopped RPC working
         # Wait for RPC interface to be available or 10s for <7.5 with GUI
@@ -622,6 +622,8 @@ class zynthian_engine_pianoteq(zynthian_engine):
             result = requests.post(url, json=payload).json()
         except:
             return None
+        #logging.debug(f"URL => {url}, payload => {payload}")
+        #logging.debug(f"RESULT => {result}")
         return result
 
     # Get info
@@ -721,7 +723,7 @@ class zynthian_engine_pianoteq(zynthian_engine):
                     'cc': param_options[5]
                 }
             else:
-                logging.warning(f"Unknown parameter {param['id']}")
+                logging.debug(f"Parameter {param['id']} not supported")
         return params
 
     #   Get a value of a parameter for the loaded preset
@@ -771,7 +773,7 @@ class zynthian_engine_pianoteq(zynthian_engine):
         return banks
 
     def set_bank(self, processor, bank):
-        self.name = (f"Pianoteq {bank[0]}")
+        #self.name = (f"Pianoteq {bank[0]}")
         return True
 
     # ----------------------------------------------------------------------------
@@ -829,21 +831,24 @@ class zynthian_engine_pianoteq(zynthian_engine):
     def set_preset(self, processor, preset, preload=False):
         if self.load_preset(preset[0], preset[1]):
             self.preset = preset
-            # Rebuild controls because each preset may use different controls
-            self.generate_ctrl_screens(self.get_controllers_dict(processor))
-            processor.init_ctrl_screens()
+            processor.refresh_controllers()
+
+            # Set parameter values
+            self.params = self.get_params()
+            for param in self.params:
+                processor.controllers_dict[param].set_value(self.params[param]['value'], False)
+
+            # Amend output_mode labels depending of the loaded preset
             if self.info['version'][0] < 9:
-                if preset[3] in ['CP-80', 'Vintage Tines MKI', 'Vintage Tines MKII', 'Vintage Reeds W1', 'Clavinet D6',
-                                'Pianet N', 'Pianet T', 'Electra-Piano']:
+                if self.preset and self.preset[3] in ['CP-80', 'Vintage Tines MKI', 'Vintage Tines MKII', 'Vintage Reeds W1',
+                                    'Clavinet D6', 'Pianet N', 'Pianet T', 'Electra-Piano']:
                     processor.controllers_dict['output_mode'].set_options(
                         {'labels': ['Line out (stereo)', 'Line out (mono)', 'Room mic', 'Binaural']})
                 else:
                     processor.controllers_dict['output_mode'].set_options(
                         {'labels': ['Stereophonic', 'Monophonic', 'Microphones', 'Binaural']})
-            self.params = self.get_params()
-            for param in self.params:
-                processor.controllers_dict[param].set_value(self.params[param]['value'], False)
-            # Update control labels
+
+            # Update controller labels
             for effect in range(1, 4):
                 for effect_param in range(1, 9):
                     symbol = f'Effect[{effect}].Param[{effect_param}]'
@@ -852,6 +857,10 @@ class zynthian_engine_pianoteq(zynthian_engine):
                         processor.controllers_dict[symbol].short_name = self.params[symbol]['name']
                     except:
                         pass
+
+            #logging.debug(f"CONTROLLERS => {processor.controllers_dict}")
+            #logging.debug(f"SCREENS => {processor.ctrl_screens_dict}")
+
             return True
         return False
 
@@ -930,6 +939,9 @@ class zynthian_engine_pianoteq(zynthian_engine):
             else:
                 zctrl = zynthian_controller(self, param_id, options)
                 processor.controllers_dict[param_id] = zctrl
+
+        # Regenerate CTRL screens
+        self.generate_ctrl_screens(processor.controllers_dict)
 
         return processor.controllers_dict
 

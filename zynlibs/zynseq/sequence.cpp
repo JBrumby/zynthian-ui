@@ -1,20 +1,44 @@
+/*  Defines sequence class providing collection of tracks
+ *
+ *   Copyright (c) 2020-2025 Brian Walton
+ *
+ *   This program is free software; you can redistribute it and/or modify
+ *   it under the terms of the GNU General Public License as published by
+ *   the Free Software Foundation; either version 2 of the License, or
+ *   (at your option) any later version.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *   You should have received a copy of the GNU General Public License
+ *   along with this program; if not, write to the Free Software
+ *   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ */
+
 #include "sequence.h"
 
-Sequence::Sequence() {
+Sequence::Sequence(Sequence* phraseSequence) {
+    m_pPhraseSequence = phraseSequence;
+    for (uint8_t nSeq = 0; nSeq < 32; ++nSeq)
+        m_aChildSequences[nSeq] = nullptr;
     addTrack(); // Ensure new sequences have at least one track
 }
-
-uint8_t Sequence::getGroup() { return m_nGroup; }
+//
+uint8_t Sequence::getGroup() {
+    return m_nGroup;
+}
 
 void Sequence::setGroup(uint8_t group) {
     if (m_nGroup == group)
         return;
-    m_nGroup   = group;
+    m_nGroup = group;
     m_bChanged = true;
 }
 
 uint32_t Sequence::addTrack(uint32_t track) {
-    auto it          = m_vTracks.begin();
+    auto it = m_vTracks.begin();
     uint32_t nReturn = ++track;
     if (track == -1 || track >= m_vTracks.size()) {
         m_vTracks.emplace_back();
@@ -52,27 +76,74 @@ Track* Sequence::getTrack(size_t index) {
     return NULL;
 }
 
-void Sequence::addTempo(uint16_t tempo, uint16_t bar, uint16_t tick) {
-    m_timebase.addTimebaseEvent(bar, tick, TIMEBASE_TYPE_TEMPO, tempo);
+void Sequence::setTempo(float tempo) {
+    m_fTempo = tempo;
+}
+
+float Sequence::getTempo() {
+    return m_fTempo;
+}
+
+bool Sequence::setTimeSig(uint8_t sig) {
+    m_nTimeSig = sig;
+    bool bLenChange = false;
+    if (isPhraseLauncher()) {
+        // Iterate each sequence in phrase
+        for (uint8_t nSeq = 0; nSeq < 32; ++nSeq) {
+            Sequence* pChildSeq = m_aChildSequences[nSeq];
+            if (!pChildSeq) continue;
+            Track* pTrack = pChildSeq->getTrack(0);
+            if (pTrack) {
+                Pattern* pPattern = pTrack->getPattern(0);
+                // For each empty pattern, adjust number of beats to fit exactly 1 bar => bpb
+                if (pPattern && pPattern->getLastStep() == -1) {
+                    pPattern->setBeatsInPattern(sig);
+                    bLenChange = true;
+                }
+            }
+        }
+    }
+    m_bChanged = true;
+    return bLenChange;
+}
+
+uint8_t Sequence::getTimeSig() {
+    return m_nTimeSig;
+}
+
+void Sequence::addTempo(float tempo, uint16_t bar, uint16_t tick) {
+    m_timebase.addTimebaseEvent(bar, tick, TIMEBASE_TYPE_TEMPO, tempo * 100);
     m_bChanged = true;
 }
 
-uint16_t Sequence::getTempo(uint16_t bar, uint16_t tick) { return m_timebase.getTempo(bar, tick); }
+void Sequence::removeTempo(uint16_t bar, uint16_t tick) {
+    m_timebase.removeTimebaseEvent(bar, tick, TIMEBASE_TYPE_TEMPO);
+    m_bChanged = true;
+}
 
-void Sequence::addTimeSig(uint16_t beatsPerBar, uint16_t bar) {
+float Sequence::getTempoAt(uint16_t bar, uint16_t tick) {
+    return m_timebase.getTempo(bar, tick);
+}
+
+void Sequence::addTimeSig(uint8_t timeSig, uint16_t bar) {
     if (bar < 1)
         bar = 1;
-    m_timebase.addTimebaseEvent(bar, 0, TIMEBASE_TYPE_TIMESIG, beatsPerBar);
+    m_timebase.addTimebaseEvent(bar, 0, TIMEBASE_TYPE_TIMESIG, timeSig);
     m_bChanged = true;
 }
 
-uint16_t Sequence::getTimeSig(uint16_t bar) {
+void Sequence::removeTimeSig(uint16_t bar) {
+    m_timebase.removeTimebaseEvent(bar, 0, TIMEBASE_TYPE_TIMESIG);
+    m_bChanged = true;
+}
+
+uint8_t Sequence::getTimeSigAt(uint16_t bar) {
     if (bar < 1)
         bar = 1;
     TimebaseEvent* pEvent = m_timebase.getPreviousTimebaseEvent(bar, 1, TIMEBASE_TYPE_TIMESIG);
     if (pEvent)
         return pEvent->value;
-    return 4;
+    return 0;
 }
 
 Timebase* Sequence::getTimebase() {
@@ -80,100 +151,193 @@ Timebase* Sequence::getTimebase() {
     return &m_timebase;
 }
 
-uint8_t Sequence::getPlayMode() { return m_nMode; }
+uint8_t Sequence::getPlayMode() {
+    return m_nMode;
+}
 
 void Sequence::setPlayMode(uint8_t mode) {
-    if (mode > LASTPLAYMODE)
-        return;
     m_nMode = mode;
-    if (m_nMode == DISABLED)
-        m_nState = STOPPED;
     m_bChanged = true;
 }
 
-uint8_t Sequence::getPlayState() { return m_nState; }
+uint8_t Sequence::getPlayState() {
+    return m_nState;
+}
 
-void Sequence::setPlayState(uint8_t state) {
+void Sequence::setPlayState(uint8_t state, bool updatePhrase) {
+    if (state == CHILD_STOPPING) {
+        for (auto pSequence: m_aChildSequences) {
+            if (pSequence)
+                pSequence->setPlayState(STOPPING);
+        }
+    }
+    if (state == STOPPING && m_nState == STOPPED)
+        return;
     uint8_t nState = m_nState;
-    if (m_nMode == DISABLED)
+    if (m_nRepeat == 0) // Disabled
         state = STOPPED;
     if (state == m_nState)
         return;
-    if ((m_nMode == ONESHOT || m_nMode == LOOP) && (state == STOPPING || state == STOPPING_SYNC))
+    if ((m_nMode & MODE_END_IMMEDIATE) && (state == STOPPING || state == STOPPING_SYNC)) {
         state = STOPPED;
+    }
     m_nState = state;
     if (m_nState == STOPPED)
-        if (m_nMode == ONESHOT) {
-            m_nPosition = m_nLastSyncPos;
-            for (auto it = m_vTracks.begin(); it != m_vTracks.end(); ++it)
-                (*it).setPosition(m_nPosition);
-        } else
-            m_nPosition = 0;
+        m_nPosition = 0;
+
+    if (updatePhrase)
+        updatePhraseState();
+
     m_bStateChanged |= (nState != m_nState);
     m_bChanged = true;
+    if (m_nState == STARTING || m_nState == STOPPED)
+        m_nCount = 0;
 }
 
-uint32_t Sequence::getState() { return (m_nGroup << 16) | (m_nMode << 8) | m_nState; }
+void Sequence::updatePhraseState() {
+    // Find which sequence is the phrase, this or its parent.
+    Sequence* pPhraseSequence = m_pPhraseSequence;
+    if (!pPhraseSequence)
+        pPhraseSequence = this;
+    uint8_t state = pPhraseSequence->getPlayState();
+    if (state != STOPPED && state != CHILD_PLAYING && state != CHILD_STOPPING)
+        return;
+    for (auto pChildSequence: pPhraseSequence->m_aChildSequences) {
+        if (pChildSequence && (pChildSequence->getPlayState() & 1) && state != CHILD_STOPPING) {
+            pPhraseSequence->setPlayState(CHILD_PLAYING, false);
+            return;
+        }
+    }
+    pPhraseSequence->setPlayState(STOPPED, false);
+}
 
-uint8_t Sequence::clock(uint32_t nTime, bool bSync, double dSamplesPerClock) {
+uint32_t Sequence::getState() {
+    return (m_nRepeat << 24) | (m_nGroup << 16) | (m_nMode << 8) | m_nState;
+}
+
+uint8_t Sequence::clock(uint32_t nTime, bool bSync, uint8_t nTimeSig) {
     m_nCurrentTrack = 0;
     uint8_t nReturn = 0;
-    uint8_t nState  = m_nState;
-    if (bSync) {
-        if (m_nMode == ONESHOTSYNC && m_nState != STARTING)
-            m_nState = STOPPED;
-        if (m_nState == STARTING)
-            m_nState = PLAYING;
-        if (m_nState == RESTARTING) {
-            m_nState = PLAYING;
-            nState   = PLAYING;
-        }
-        if (m_nState == STOPPING && m_nMode == LOOPSYNC)
-            m_nState = STOPPED;
-        if (m_nState == STOPPING_SYNC) {
-            m_nState    = STOPPED;
-            m_nPosition = 0;
-        }
-        if (m_nMode == ONESHOTSYNC || m_nMode == LOOPSYNC)
-            m_nPosition = 0;
-        m_nLastSyncPos = m_nPosition;
-    } else if (m_nState == RESTARTING)
-        m_nState = STARTING;
+    uint8_t nState = m_nState;
+    uint8_t nCountInc = (m_nState == STARTING) ? 0 : 1;
+    uint32_t nPulsesBar = PPQN_INTERNAL * nTimeSig;
+    bool bPhraseLauncher = isPhraseLauncher();
 
-    if (m_nState == PLAYING || m_nState == STOPPING || m_nState == STOPPING_SYNC) {
-        // Still playing so iterate through tracks
-        for (auto it = m_vTracks.begin(); it != m_vTracks.end(); ++it)
-            nReturn |= (*it).clock(nTime, m_nPosition, dSamplesPerClock, bSync);
-        ++m_nPosition;
-    }
-    if (m_nPosition >= m_nLength) {
-        // End of sequence
-        switch (m_nMode) {
-        case ONESHOT:
-        case ONESHOTALL:
-        case ONESHOTSYNC:
-            setPlayState(STOPPED);
-            break;
-        case LOOPSYNC:
-        case LOOPALL:
-            if (m_nState == PLAYING) {
-                m_nState = RESTARTING;
-                nState   = RESTARTING;
+    // Phrase
+    if (bPhraseLauncher) {
+        // Start of bar
+        if (bSync) {
+            if (m_nMode & MODE_END_SYNC) {
+                if (m_nState == STOPPING) {
+                    setPlayState(STOPPED);
+                    m_nPosition = 0;
+                }
             }
-        case LOOP:
-            if (m_nState == STOPPING || m_nState == STOPPING_SYNC)
+            if (m_nState == STARTING) {
+                setPlayState(PLAYING);
+                nReturn |= CLOCK_TRIG_PHRASE;
+                if (m_fTempo)
+                    nReturn |= CLOCK_TRIG_TEMPO;
+                if (m_nTimeSig)
+                    nReturn |= CLOCK_TRIG_TIMESIG;
+            }
+            else if (m_nState == STOPPING_SYNC) {
                 setPlayState(STOPPED);
+                m_nPosition = 0;
+            }
+            // Playing at start of first phrase bar => must be triggering phrase
+            else if (m_nState == PLAYING && m_nCount == 0) {
+                nReturn |= CLOCK_TRIG_PHRASE;
+                if (m_fTempo)
+                    nReturn |= CLOCK_TRIG_TEMPO;
+                if (m_nTimeSig)
+                    nReturn |= CLOCK_TRIG_TIMESIG;
+            }
         }
-        m_nPosition    = 0;
-        m_nLastSyncPos = 0;
+        // Still playing phrase => update position
+        if (m_nState == PLAYING || m_nState == STOPPING || m_nState == STOPPING_SYNC) {
+            ++m_nPosition;
+        }
+        // End of phrase
+        if (m_nPosition >= nPulsesBar) {
+            if (m_nState == PLAYING) {
+                m_nCount += nCountInc;
+                m_nPosition = 0;
+                bool bFollow;
+                if (m_nRepeat == 255)
+                    bFollow = (m_nCount * nPulsesBar >= m_nLength);
+                else
+                    bFollow = (m_nCount >= m_nRepeat);
+                if (bFollow) {
+                    // Trigger Follow Action
+                    nReturn |= CLOCK_TRIG_SEQEND;
+                    // Stop if not looping self
+                    if (m_nFollowAction != FOLLOW_ACTION_RELATIVE || m_nFollowParam != 0)
+                        setPlayState(STOPPED);
+                }
+            } else {
+                setPlayState(STOPPED);
+                m_nPosition = 0;
+            }
+        }
+    }
+
+    // "Normal" sequence => Not a phrase!!
+    else {
+        // Start of bar
+        if (bSync) {
+            if (m_nMode & MODE_END_SYNC) {
+                if (m_nState == STOPPING) {
+                    setPlayState(STOPPED);
+                    m_nPosition = 0;
+                }
+            }
+            if (m_nState == STARTING) {
+                setPlayState(PLAYING);
+            }
+            else if (m_nState == STOPPING_SYNC) {
+                setPlayState(STOPPED);
+                m_nPosition = 0;
+            }
+        }
+        // Still playing so iterate through tracks
+        if (m_nState == PLAYING || m_nState == STOPPING || m_nState == STOPPING_SYNC) {
+            bool trig = false;
+            for (auto it = m_vTracks.begin(); it != m_vTracks.end(); ++it)
+                trig |= (*it).clock(nTime, m_nPosition, bSync);
+            if (trig)
+                nReturn |= CLOCK_TRIG_MIDI;
+            ++m_nPosition;
+        }
+        // End of sequence
+        if (m_nPosition >= m_nLength) {
+            if (m_nState == PLAYING) {
+                m_nCount += nCountInc;
+                m_nPosition = 0;
+                // Stop when not looping forever and reached the number of repeats
+                if (m_nRepeat != 255 and m_nCount >= m_nRepeat) {
+                    nReturn |= CLOCK_TRIG_SEQEND;
+                    setPlayState(STOPPED);
+                }
+            } else {
+                setPlayState(STOPPED);
+                for (auto pChildSeq: m_aChildSequences) {
+                    if (pChildSeq)
+                        pChildSeq->setPlayState(STOPPING_SYNC); // stopping_sync so that child sequences stop in sync
+                }
+            }
+            m_nPosition = 0;
+        }
     }
 
     m_bStateChanged |= (nState != m_nState);
     if (m_bStateChanged) {
-        m_bChanged |= true;
+        m_bChanged = true;
         m_bStateChanged = false;
-        return nReturn | 2;
+        if (m_nState == PLAYING)
+            m_pNextTimebaseEvent = m_timebase.getFirstTimebaseEvent();
     }
+
     return nReturn;
 }
 
@@ -184,7 +348,7 @@ SEQ_EVENT* Sequence::getEvent() {
 
     SEQ_EVENT* pEvent;
     while (m_nCurrentTrack < m_vTracks.size()) {
-        pEvent = m_vTracks[m_nCurrentTrack].getEvent();
+        pEvent = m_vTracks[m_nCurrentTrack].getEvent(m_nCount);
         if (pEvent)
             return pEvent;
         ++m_nCurrentTrack;
@@ -192,14 +356,24 @@ SEQ_EVENT* Sequence::getEvent() {
     return NULL;
 }
 
-void Sequence::updateLength() {
-    m_nLength = 0;
-    m_bEmpty  = true;
-    for (auto it = m_vTracks.begin(); it != m_vTracks.end(); ++it) {
-        uint32_t nTrackLength = (*it).updateLength();
-        if (nTrackLength > m_nLength)
-            m_nLength = nTrackLength;
-        m_bEmpty &= (*it).isEmpty();
+void Sequence::updateLength(uint32_t length) {
+    if (length) m_nLength = length;
+    else {
+        if (isPhraseLauncher()) {
+            updatePhraseLength();
+        }
+        else {
+            m_nLength = 0;
+            m_bEmpty = true;
+            for (auto it = m_vTracks.begin(); it != m_vTracks.end(); ++it) {
+                uint32_t nTrackLength = (*it).updateLength();
+                if (nTrackLength > m_nLength)
+                    m_nLength = nTrackLength;
+                m_bEmpty &= (*it).isEmpty();
+            }
+            if (m_pPhraseSequence)
+                m_pPhraseSequence->updatePhraseLength();
+        }
     }
 }
 
@@ -226,4 +400,97 @@ void Sequence::setName(std::string sName) {
     m_sName.resize(16);
 }
 
-std::string Sequence::getName() { return m_sName; }
+std::string Sequence::getName() {
+    return m_sName;
+}
+
+void Sequence::setFollowAction(uint8_t action, int16_t param, uint32_t playFlags, uint8_t repeat) {
+    m_nFollowAction = action;
+    m_nFollowParam = param;
+    m_nPlayFlags = playFlags;
+    m_nFollowRepeat = repeat;
+}
+
+
+uint8_t Sequence::getFollowAction() {
+    return m_nFollowAction;
+}
+
+int16_t Sequence::getFollowParam() {
+    return m_nFollowParam;
+}
+
+uint32_t Sequence::getPlayFlags() {
+    return m_nPlayFlags;
+}
+
+uint8_t Sequence::getFollowRepeat() {
+    return m_nFollowRepeat;
+}
+
+bool Sequence::isFollowPlay(uint8_t repeat) {
+    return ((1 << repeat) & m_nPlayFlags) == 0;
+}
+
+void Sequence::setRepeat(uint8_t repeat) {
+    m_nRepeat = repeat;
+    if (m_pPhraseSequence)
+        m_pPhraseSequence->updatePhraseLength();
+    else if (repeat == 255)
+        updatePhraseLength();
+}
+
+uint8_t Sequence::getRepeat() {
+    return m_nRepeat;
+}
+
+void Sequence::updatePhraseLength() {
+    m_nLength = 0;
+    for (auto pSequence: m_aChildSequences) {
+        if (!pSequence)
+            continue;
+        uint32_t nDuration;
+        if (pSequence->m_nRepeat == 255)
+            nDuration = pSequence->m_nLength;
+        else
+            nDuration = pSequence->m_nLength * pSequence->m_nRepeat;
+        if (nDuration > m_nLength)
+            m_nLength = nDuration;
+    }
+}
+
+void Sequence::setPlayed(uint8_t played) {
+    m_nCount = played;
+}
+
+uint8_t Sequence::getPlayed() {
+    return m_nCount;
+}
+
+bool Sequence::isPhraseLauncher() {
+    return m_pPhraseSequence == nullptr;
+}
+
+bool Sequence::isPhraseEmpty() {
+    if (isPhraseLauncher()) {
+        for (uint8_t nSeq = 0; nSeq < 32; ++nSeq) {
+            Sequence* pChildSeq = m_aChildSequences[nSeq];
+            if (!pChildSeq) continue;
+            Track* pTrack = pChildSeq->getTrack(0);
+            if (!pTrack) continue;
+            Pattern* pPattern = pTrack->getPattern(0);
+            if (pPattern && pPattern->getLastStep() >= 0)
+                return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+void Sequence::setPhrase(uint8_t phrase) {
+    m_nPhrase = phrase;
+}
+
+uint8_t Sequence::getPhrase() {
+    return m_nPhrase;
+}

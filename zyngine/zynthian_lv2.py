@@ -5,7 +5,7 @@
 #
 # zynthian LV2
 #
-# Copyright (C) 2015-2024 Fernando Moyano <jofemodo@zynthian.org>
+# Copyright (C) 2015-2026 Fernando Moyano <jofemodo@zynthian.org>
 #
 # ******************************************************************************
 #
@@ -34,6 +34,11 @@ import string
 import hashlib
 import logging
 import urllib.parse
+import shutil
+import platform
+from subprocess import run, Popen, STDOUT, PIPE
+from rdflib import Graph, Namespace, RDF
+
 from enum import Enum
 from random import randrange
 
@@ -48,6 +53,7 @@ class EngineType(Enum):
     AUDIO_EFFECT = "Audio Effect"
     AUDIO_GENERATOR = "Audio Generator"
     SPECIAL = "Special"
+    GLOBAL = "Global"
     # UNKNOWN = "Unknown"
 
 
@@ -84,7 +90,8 @@ engine_categories = {
         "Dynamics",
         "Filter & EQ",
         "Modulation",
-        "Panning & Spatial",
+        "Panning",
+        "Spatial",
         "Pitch",
         "Reverb",
         "Simulator",
@@ -130,8 +137,9 @@ lv2class2engcat = {
     "Equaliser": "Filter & EQ",
     "Modulator": "Modulation",
     "Expander": "Dynamics",
-    "Spatial": "Panning & Spatial",
-    "Panning": "Panning & Spatial",
+    "Spatial": "Spatial",
+    "Panning": "Panning",
+    "Panning & Spatial": "Panning",
     "Limiter": "Dynamics",
     "Pitch Shifter": "Pitch",
     "Reverb": "Reverb",
@@ -156,6 +164,7 @@ standalone_engine_info = {
     "FS": ["FluidSynth", "FluidSynth: SF2, SF3", "MIDI Synth", "Sampler", True],
     "SF": ["Sfizz", "Sfizz: SFZ", "MIDI Synth", "Sampler", True],
     "LS": ["LinuxSampler", "LinuxSampler: SFZ, GIG", "MIDI Synth", "Sampler", True],
+    "CL": ["Clippy", "Clip launcher", "Audio Generator", "Other", True],
     "BF": ["setBfree", "setBfree - Hammond Emulator", "MIDI Synth", "Organ", True],
     "AE": ["Aeolus", "Aeolus - Pipe Organ Emulator", "MIDI Synth", "Organ", True],
     "PT": ['Pianoteq', "Pianoteq", "MIDI Synth", "Piano", True],
@@ -169,16 +178,22 @@ standalone_engine_info = {
 }
 
 rpi5_plugins = [
-    "http://theusualsuspects.lv2.Osirus",
-    "http://theusualsuspects.lv2.OsTIrus"
+    "http://theusualsuspects.lv2/Osirus",
+    "http://theusualsuspects.lv2/OsTIrus",
+    "http://theusualsuspects.lv2/Vavra",
+    "http://theusualsuspects.lv2/Xenia",
+    "http://theusualsuspects.lv2/JE8086"
 ]
 
-ENGINE_DEFAULT_CONFIG_FILE = "{}/config/engine_config.json".format(
-    os.environ.get('ZYNTHIAN_SYS_DIR'))
-ENGINE_CONFIG_FILE = "{}/engine_config.json".format(
-    os.environ.get('ZYNTHIAN_CONFIG_DIR'))
-JALV_LV2_CONFIG_FILE = "{}/jalv/plugins.json".format(
-    os.environ.get('ZYNTHIAN_CONFIG_DIR'))
+try:
+    rbpi_version_number = int(os.environ.get('RBPI_VERSION_NUMBER', '4'))
+except:
+    rbpi_version_number = 4
+
+ENGINE_DEFAULT_CONFIG_FILE = "{}/config/engine_config.json".format(os.environ.get('ZYNTHIAN_SYS_DIR'))
+ENGINE_CONFIG_FILE = "{}/engine_config.json".format(os.environ.get('ZYNTHIAN_CONFIG_DIR'))
+JALV_LV2_CONFIG_FILE = "{}/jalv/plugins.json".format(os.environ.get('ZYNTHIAN_CONFIG_DIR'))
+LV2_DIR = "/zynthian/zynthian-plugins/lv2"
 
 engines = None
 engines_by_type = None
@@ -206,6 +221,7 @@ def init_lilv():
     world.ns.doap = lilv.Namespace(world, "http://usefulinc.com/ns/doap#")
     world.ns.mod = lilv.Namespace(world, "http://moddevices.com/ns/mod#")
 
+
 # ------------------------------------------------------------------------------
 # Engines management
 # ------------------------------------------------------------------------------
@@ -224,6 +240,7 @@ def get_engines():
 
 def load_engines():
     global engines, engines_mtime
+    init_lilv()
     engines = {}
 
     if os.path.exists(ENGINE_CONFIG_FILE):
@@ -242,6 +259,12 @@ def load_engines():
     # Regenerate config file if it doesn't exist or is an older version
     if not os.path.exists(ENGINE_CONFIG_FILE) or 'AE' in engines and "ID" not in engines['AE']:
         generate_engines_config_file(reset_rankings=1)
+
+    # Remove not supported engines
+    for key in list(engines.keys()):
+        if rbpi_version_number < 5 and 'URL' in engines[key] and engines[key]['URL'] in rpi5_plugins:
+            logging.debug(f"Removing {key} from engine list.")
+            engines.pop(key, None)
 
     get_engines_by_type()
     return engines
@@ -267,7 +290,7 @@ def save_engines():
     # Save to file
     try:
         with open(ENGINE_CONFIG_FILE, 'w') as f:
-            json.dump(sengines, f)
+            json.dump(sengines, f, indent=0)
         engines_mtime = os.stat(ENGINE_CONFIG_FILE).st_mtime
         logging.info(
             f"Saved engine config file with timestamp {engines_mtime}")
@@ -328,6 +351,7 @@ def is_engine_enabled(key, default=False):
 
 
 def get_engine_description(key):
+    return ""
     description = [
         "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
         "Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
@@ -335,15 +359,135 @@ def get_engine_description(key):
         "Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum."]
     return description[randrange(4)]
 
+def get_info_from_ttl(bundle_path):
+    """ Get a dictionary of info about each plugin from ttl files in a bundle 
+    Args:
+        path: Path to .lv2 directory
+    Returns: Dictionary of info, indexed by plugin uri
+    """
 
-def generate_engines_config_file(refresh=True, reset_rankings=None):
-    global engines, engines_mtime
-    genengines = {}
+    info = {}
+    g = Graph()
+    for fname in os.listdir(bundle_path):
+        if fname.endswith(".ttl"):
+            g.parse(os.path.join(bundle_path, fname), format="turtle")
+    for plugin in g.subjects(RDF.type, Namespace("http://lv2plug.in/ns/lv2core#").Plugin):
+        uri = str(plugin)
+        info[uri] = {
+            "name": str(g.value(plugin, Namespace("http://usefulinc.com/ns/doap#").name)),
+            "description": str(g.value(plugin, Namespace("http://usefulinc.com/ns/doap#").description)),
+            "minorVersion": str(g.value(plugin, Namespace("http://lv2plug.in/ns/lv2core#").minorVersion)),
+            "microVersion": str(g.value(plugin, Namespace("http://lv2plug.in/ns/lv2core#").microVersion)),
+            "comment": str(g.value(plugin, Namespace("http://www.w3.org/2000/01/rdf-schema").comment)),
+        }
+    return info
+
+def add_engine(path, enable=True, force=False):
+    """ Add a LV2 plugin from a .lv2 path
+    Args:
+        path: Path to .lv2 to install, e.g. /tmp/myplugin.lv2
+        enable: True to enable plugin after install [Default: True]
+        force: True to force install if existing plugin exists [Default: False]
+    Returns: None on success, else error message
+    """
+    global engines
+
+    # Find all lv2 plugins
+    for root, dirs, files in os.walk(path):
+        for d in dirs:
+            if d.endswith(".lv2"):
+                src = os.path.join(root, d)
+                dst = os.path.join(LV2_DIR, d)
+                # Validate plugin
+                for file in os.listdir(src):
+                    if file.endswith(".so"):
+                        result = run(["file", f"{src}/{file}"], capture_output=True, text=True)
+                        if platform.machine() not in result.stdout.strip():
+                            return f"LV2 plugin is for a different platform (expecting {platform.machine()})"
+                        if platform.machine() not in result.stdout.strip():
+                            return f"LV2 plugin is for a different operating system (expecting {platform.system()})"
+                        break
+                for uri, info in get_info_from_ttl(src).items():
+                    if not force and f"JV/{info['name']}" in engines:
+                        existing_version = new_version = ""
+                        try:
+                            plugin = world.get_all_plugins()[uri]
+                            existing_minor_ver = str(plugin.get_value(world.ns.lv2.minorVersion)[0])
+                            existing_micro_ver = str(plugin.get_value(world.ns.lv2.microVersion)[0])
+                            if existing_micro_ver and existing_minor_ver:
+                                existing_version = f" v{existing_minor_ver}.{existing_micro_ver}"
+                            if info["microVersion"] and info["minorVersion"]:
+                                new_version = f" v{info['minorVersion']}.{info['microVersion']}"
+                        except:
+                            pass
+                        return f"Failed to install {info['name']}{new_version} - {existing_version} already installed."
+                try:
+                    shutil.copytree(src, dst, dirs_exist_ok=force)
+                except:
+                    return "Plugin already installed."
+
+                try:
+                    init_lilv()
+                    plugin = world.get_all_plugins()[uri]
+                    engine_name = str(plugin.get_name())
+                except Exception as e:
+                    return f"Failed to install {path}: {e}"
+
+                key = f"JV/{engine_name}"
+                if key in engines:
+                    # Don't replace existing cache info
+                    return None
+
+                # Get plugin description
+                engine_description = get_plugin_description(plugin)
+                if not engine_description:
+                    engine_description = engine_name
+                hash = hashlib.new('sha1')
+                hash.update(key.encode())
+
+                engines[key] = {
+                    'ID': hash.hexdigest()[:10],
+                    'NAME': engine_name,
+                    'TITLE': engine_name,
+                    'TYPE': get_plugin_type(plugin).value,
+                    'CAT': get_plugin_cat(plugin),
+                    'ENABLED': enable,
+                    'INDEX': 9999,
+                    'URL': uri,
+                    'UI': get_plugin_ui(plugin),
+                    'DESCR': engine_description,
+                    "QUALITY": 0,
+                    "COMPLEX": 0,
+                    "EDIT": 0
+                }
+                engines = dict(sorted(engines.items(), key=lambda r: r[1]['TITLE'].casefold()))
+                save_engines()
+                get_engines_by_type()
+
+def remove_engine(id):
+    global engines
 
     try:
-        rbpi_version_number = int(os.environ.get('RBPI_VERSION_NUMBER', '4'))
+        uri = engines[id]["URL"]
+        plugin = world.get_all_plugins().get_by_uri(uri)
+        bundle_uri=plugin.get_bundle_uri()
+        path = urllib.parse.unquote(urllib.parse.urlparse(str(bundle_uri)).path)
+        logging.warning(f"Deleting LV2 plugin {str(plugin.get_name())} ({path})")
+        shutil.rmtree(path)
+        engines.pop(id)
+        save_engines()
+        get_engines_by_type()
     except:
-        rbpi_version_number = 4
+        pass
+
+def generate_engines_config_file(refresh=True, reset_rankings=None):
+    """ Generate the engines config cache file
+    Args:
+        refresh: True to reinitiate lilv
+        reset_rankings: Reset the engine rankings [1: Set to 0, 2: Set to random value]
+    """
+    global engines, engines_mtime
+    genengines = {}
 
     hash = hashlib.new('sha1')
     start = int(round(time.time()))
@@ -483,7 +627,7 @@ def generate_engines_config_file(refresh=True, reset_rankings=None):
         engines = dict(sorted(genengines.items(), key=lambda r: r[1]['TITLE'].casefold()))
         # Write to file
         with open(ENGINE_CONFIG_FILE, 'w') as f:
-            json.dump(engines, f)
+            json.dump(engines, f, indent=0)
         engines_mtime = os.stat(ENGINE_CONFIG_FILE).st_mtime
     except Exception as e:
         logging.error(f"Can't save engines DB => {e}")
@@ -501,6 +645,11 @@ def get_engines_by_type():
 
     for key, info in engines.items():
         engines_by_type[info['TYPE']][key] = info
+
+    try:
+        del engines_by_type["Global"]
+    except:
+        pass
 
     return engines_by_type
 
@@ -689,8 +838,10 @@ def _generate_plugin_presets_cache(plugin):
                     'presets': []
                 }
 
-        if label.startswith(bank_label):
-            label = label[len(bank_label) + 1:].strip()
+        # Disabled because it's ugly and doesn't work very well
+        #if label.startswith(bank_label):
+        #    label = label[len(bank_label) + 1:].strip()
+
         presets_info[bank_label]['presets'].append({
             'label': str(label),
             'url': str(preset)
@@ -708,8 +859,7 @@ def _generate_plugin_presets_cache(plugin):
         if len(presets_info[k]['presets']) == 0:
             del (presets_info[k])
         else:
-            presets_info[k]['presets'] = sorted(
-                presets_info[k]['presets'], key=lambda k: k['label'])
+            presets_info[k]['presets'] = sorted(presets_info[k]['presets'], key=lambda k: k['label'])
 
     # Save cache file
     save_plugin_presets_cache(plugin_name, presets_info)
@@ -742,7 +892,7 @@ def save_plugin_presets_cache(plugin_name, presets_info):
     fpath_cache = _get_plugin_preset_cache_fpath(plugin_name)
     try:
         with open(fpath_cache, 'w') as f:
-            json.dump(presets_info, f)
+            json.dump(presets_info, f, indent=0)
     except Exception as e:
         logging.error("Can't save presets cache file '{}': {}".format(fpath_cache, e))
 
@@ -789,20 +939,29 @@ def get_plugin_ports(plugin_url):
     # Control ports
     for i in range(plugin.get_num_ports()):
         control = plugin.get_port_by_index(i)
+        is_trigger = False
         if control.is_a(lilv.LILV_URI_INPUT_PORT) and control.is_a(lilv.LILV_URI_CONTROL_PORT):
             name = str(control.get_name())
             symbol = str(control.get_symbol())
 
             is_toggled = control.has_property(world.ns.lv2.toggled)
+            is_trigger = control.has_property(world.ns.portprops.trigger)
             is_integer = control.has_property(world.ns.lv2.integer)
             is_enumeration = control.has_property(world.ns.lv2.enumeration)
             is_logarithmic = control.has_property(world.ns.portprops.logarithmic)
 
+            # Parameter Desgination => http://lv2plug.in/ns/lv2core#designation
+            designation = str(control.get(world.ns.lv2.designation))
+            # Detect Envelope designation
             envelope = None
-            for env_type in ["delay", "attack", "hold", "decay", "sustain", "fade", "release"]:
-                # "http://lv2plug.in/ns/lv2core#designation"
-                if str(control.get(world.ns.lv2.designation)) == f"http://lv2plug.in/ns/ext/parameters#{env_type}":
-                    envelope = env_type
+            for env_param in ["delay", "attack", "hold", "decay", "sustain", "fade", "release"]:
+                if designation == f"http://lv2plug.in/ns/ext/parameters#{env_param}":
+                    envelope = env_param
+            # Detect Filter designation
+            filter = None
+            for flt_param in ["cutoffFrequency", "resonance"]:
+                if designation == f"http://lv2plug.in/ns/ext/parameters#{flt_param}":
+                    filter = flt_param
 
             not_on_gui = control.has_property(world.ns.portprops.notOnGUI)
             display_priority = control.get(world.ns.lv2.displayPriority)
@@ -869,6 +1028,13 @@ def get_plugin_ports(plugin_url):
             except:
                 vdef = vmin
 
+            if  symbol == "BYPASS" and plugin_url.startswith("http://guitarix"):
+                # Invert bypass for guitarix effects
+                is_toggled = True
+                vmin = 1
+                vmax = 0
+                vdef = 0
+
             ports_info[i] = {
                 'index': i,
                 'symbol': symbol,
@@ -884,6 +1050,7 @@ def get_plugin_ports(plugin_url):
                     'max': vmax
                 },
                 'is_toggled': is_toggled,
+                'is_trigger': is_trigger,
                 'is_integer': is_integer,
                 'is_enumeration': is_enumeration,
                 'is_logarithmic': is_logarithmic,
@@ -891,6 +1058,7 @@ def get_plugin_ports(plugin_url):
                 'path_file_types': None,
                 'path_preload': False,
                 'envelope': envelope,
+                'filter': filter,
                 'not_on_gui': not_on_gui,
                 'display_priority': display_priority,
                 'scale_points': sp
@@ -898,6 +1066,7 @@ def get_plugin_ports(plugin_url):
             #logging.debug("CONTROL PORT {} => {}".format(i, ports_info[i]))
 
     # Property parameters
+    i = len(ports_info)
     for control in world.find_nodes(plugin.get_uri(), world.ns.patch.writable, None):
         symbol = world.get_symbol(control)
         name = str(world.get(control, world.ns.rdfs.label, None))
@@ -910,6 +1079,7 @@ def get_plugin_ports(plugin_url):
             vmin = None
             vmax = None
             is_toggled = False
+            is_trigger = False
             is_integer = False
             is_enumeration = False
             is_logarithmic = False
@@ -920,12 +1090,14 @@ def get_plugin_ports(plugin_url):
             # TODO => Implement LV2 port propierty for path preload => only if really needed!
             path_preload = True
             envelope = None
+            filter = None
             sp = []
         else:
             vdef = get_node_value(world.get(control, world.ns.lv2.default, None))
             vmin = get_node_value(world.get(control, world.ns.lv2.minimum, None))
             vmax = get_node_value(world.get(control, world.ns.lv2.maximum, None))
 
+            is_trigger = False
             is_toggled = (range_type == world.ns.atom.Bool)
             is_integer = (range_type == world.ns.atom.Int)
             is_enumeration = world.get(control, world.ns.lv2.enumeration, None) is not None
@@ -934,10 +1106,18 @@ def get_plugin_ports(plugin_url):
             path_file_types = None
             path_preload = False
 
+            # Parameter Desgination => http://lv2plug.in/ns/lv2core#designation
+            designation = str(world.get(control, world.ns.lv2.designation, None))
+            # Detect Envelope designation
             envelope = None
-            for env_type in ["delay", "attack", "hold", "decay", "sustain", "fade", "release"]:
-                if str(world.get(control, world.ns.lv2.designation, None)) == f"http://lv2plug.in/ns/ext/parameters#{env_type}":
-                    envelope = env_type
+            for env_param in ["delay", "attack", "hold", "decay", "sustain", "fade", "release"]:
+                if designation == f"http://lv2plug.in/ns/ext/parameters#{env_param}":
+                    envelope = env_param
+            # Detect Filter designation
+            filter = None
+            for flt_param in ["cutoffFrequency", "resonance"]:
+                if designation == f"http://lv2plug.in/ns/ext/parameters#{flt_param}":
+                    filter = flt_param
 
             sp = []
             for p in world.find_nodes(control, world.ns.lv2.scalePoint, None):
@@ -1003,6 +1183,7 @@ def get_plugin_ports(plugin_url):
                 'max': vmax
             },
             'is_toggled': is_toggled,
+            'is_trigger': is_trigger,
             'is_integer': is_integer,
             'is_enumeration': is_enumeration,
             'is_logarithmic': is_logarithmic,
@@ -1010,6 +1191,7 @@ def get_plugin_ports(plugin_url):
             'path_file_types': path_file_types,
             'path_preload': path_preload,
             'envelope': envelope,
+            'filter': filter,
             'not_on_gui': not_on_gui,
             'display_priority': display_priority,
             'scale_points': sp
@@ -1019,13 +1201,67 @@ def get_plugin_ports(plugin_url):
     return ports_info
 
 
+def test_lv2_plugin(plugin_info):
+    logging.info(f"Testing '{plugin_info['NAME']}' <{plugin_info['URL']}> ...")
+    # Start jalv instance
+    try:
+        #command = ["jalv", "-s", plugin_info['URL']]
+        command = ["jalv", plugin_info['URL']]
+        command_env = os.environ.copy()
+        if plugin_info['NAME'].endswith("v1"):
+            command_env['DISPLAY'] = ":0"
+            #logging.warning(f"\tOmitting test!!")
+            #return False
+        else:
+            command_env['DISPLAY'] = "X"
+        command_prompt = ">"
+        proc = Popen(command, env=command_env, shell=False, text=True, bufsize=1, stdout=PIPE, stderr=STDOUT, stdin=PIPE)
+    except Exception as e:
+        logging.error(f"\tCan't start jalv => {e}")
+        return False
+
+    # Read lines until prompt
+    try:
+        res = ""
+        while proc.returncode is None:
+            line = proc.stdout.readline().strip()
+            if line == command_prompt:
+                break
+            elif line:
+                res += line
+                if "error: Failed to instantiate plugin" in line:
+                    logging.error(line)
+                    return False
+                elif "aborted" in line.lower():
+                    logging.error(line)
+                    return False
+                elif "segmentation fault" in line.lower():
+                    logging.error(line)
+                    return False
+    except Exception as e:
+        logging.error(f"\tCan't parse prompt => {e}")
+        return False
+
+    # End plugin
+    try:
+        proc.stdin.writelines(["\n"])
+    except Exception as e:
+        logging.error(f"\tException while ending jalv => {e}")
+    proc.terminate()
+    try:
+        proc.communicate(timeout=5)
+    except Exception as e:
+        logging.warning(f"\tCan't terminate jalv. Killing it! => {e}")
+        proc.kill()
+        return False
+
+    return True
+
 # ------------------------------------------------------------------------------
 # Main program
 # ------------------------------------------------------------------------------
 
 
-# Init Lilv
-init_lilv()
 # Load engine info from cache
 load_engines()
 
@@ -1067,6 +1303,18 @@ if __name__ == '__main__':
         elif sys.argv[1] == "all":
             generate_engines_config_file(refresh=False)
             generate_all_presets_cache(False)
+
+        elif sys.argv[1] == "test_lv2_plugins":
+            if len(sys.argv) > 3:
+                info = {
+                    'URL': sys.argv[2],
+                    'NAME': sys.argv[3]
+                }
+                test_lv2_plugin(info)
+            else:
+                for key, info in engines.items():
+                    if 'URL' in info and info['URL']:
+                        test_lv2_plugin(info)
 
     else:
         generate_engines_config_file(refresh=False)

@@ -37,9 +37,9 @@ from zyngui import zynthian_gui_config
 class zynthian_widget_base(tkinter.Frame):
 
     def __init__(self, parent):
-        super().__init__(parent, bg=zynthian_gui_config.color_bg)
+        super().__init__(parent.main_frame, bg=zynthian_gui_config.color_bg)
         self.zyngui = zynthian_gui_config.zyngui
-        self.zyngui_control = self.zyngui.screens['control']
+        self.zyngui_control = parent
         self.width = 1
         self.height = 1
         self.wide = self.zyngui_control.wide
@@ -52,14 +52,22 @@ class zynthian_widget_base(tkinter.Frame):
         self.bind('<Configure>', self.on_size)
 
     def on_size(self, event):
+        """ Handle GUI layout change
+
+        Parameters:
+            event - size event
+        Returns: True if size changed
+        """
+
         if event.width == self.width and event.height == self.height:
-            return
+            return False
         self.width = event.width
         self.height = event.height
         try:
             self.widget_canvas.configure(width=self.width, height=self.height)
         except:
             pass
+        return True
 
     def show(self):
         if not self.shown:
@@ -72,7 +80,7 @@ class zynthian_widget_base(tkinter.Frame):
     def update(self):
         if self.shown and self.zyngui_control.shown:
             self.get_monitors()
-            self.refresh_gui()
+            zynthian_gui_config.top.after_idle(self.refresh_gui)
 
     def set_processor(self, processor):
         self.processor = processor

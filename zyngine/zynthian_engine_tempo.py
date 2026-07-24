@@ -1,0 +1,142 @@
+# -*- coding: utf-8 -*-
+# ******************************************************************************
+# ZYNTHIAN PROJECT: Zynthian Engine (zynthian_engine_tempo)
+#
+# zynthian_engine implementation for Tempo control
+#
+# Copyright (C) 2015-2026 Fernando Moyano <jofemodo@zynthian.org>
+#
+# ******************************************************************************
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License as
+# published by the Free Software Foundation; either version 2 of
+# the License, or any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# For a full copy of the GNU General Public License see the LICENSE.txt file.
+#
+# ******************************************************************************
+
+import logging
+from time import monotonic
+from collections import deque
+
+from zyncoder.zyncore import lib_zyncore
+from zyngine.zynthian_engine import zynthian_engine
+from zyngine.zynthian_controller import zynthian_controller
+import zynautoconnect
+
+# ------------------------------------------------------------------------------
+# Tempo Engine Class
+# ------------------------------------------------------------------------------
+
+
+class zynthian_engine_tempo(zynthian_engine):
+
+    # ---------------------------------------------------------------------------
+    # Controllers & Screens
+    # ---------------------------------------------------------------------------
+
+    _ctrl_screens = [
+        ["Tempo", ["bpm", "metro_enable", "metro_volume", "ppqn"]]
+    ]
+
+    # ----------------------------------------------------------------------------
+    # ZynAPI variables
+    # ----------------------------------------------------------------------------
+
+    zynapi_instance = None
+
+    # ----------------------------------------------------------------------------
+    # Initialization
+    # ----------------------------------------------------------------------------
+
+    def __init__(self, state_manager=None, proc=None):
+        super().__init__(state_manager)
+
+        self.type = "Tempo"
+        self.name = "Tempo"
+        self.nickname = "TP"
+        self.custom_gui_fpath = "/zynthian/zynthian-ui/zyngui/zynthian_widget_tempo.py"
+        self.processor = proc
+
+        self.audio_out = []
+        self.options['midi_chan'] = False
+        self.options['replace'] = False
+
+        self.zctrls = None
+
+    # ---------------------------------------------------------------------------
+    # Processor Management
+    # ---------------------------------------------------------------------------
+
+    def get_path(self, processor):
+        return self.name
+
+    # ---------------------------------------------------------------------------
+    # MIDI Channel Management
+    # ---------------------------------------------------------------------------
+
+    # ----------------------------------------------------------------------------
+    # Bank Managament
+    # ----------------------------------------------------------------------------
+
+    def get_bank_list(self, processor=None):
+        return [("", None, "", None)]
+
+    def set_bank(self, processor, bank):
+        return True
+
+    # ----------------------------------------------------------------------------
+    # Preset Managament
+    # ----------------------------------------------------------------------------
+
+    def get_preset_list(self, bank, processor=None):
+        return [("", None, "", None)]
+
+    def set_preset(self, processor, preset, preload=False):
+        return True
+
+    def cmp_presets(self, preset1, preset2):
+        return True
+
+    # ----------------------------------------------------------------------------
+    # Controllers Managament
+    # ----------------------------------------------------------------------------
+
+    def get_controllers_dict(self, processor=None, ctrl_list=None):
+        if zynautoconnect.get_ext_clock_zmip() < 0:
+            self._ctrl_screens = [["Tempo", ["bpm", "metro_enable", "metro_volume"]]]
+        else:
+            self._ctrl_screens = [["Tempo", ["ppqn", "metro_enable", "metro_volume"]]]
+
+        if processor:
+            if not processor.controllers_dict:
+                processor.controllers_dict = {
+                    "bpm": self.state_manager.zynseq.zctrl_tempo,
+                    "metro_enable": self.state_manager.zynseq.zctrl_metro_mode,
+                    "metro_volume": self.state_manager.zynseq.zctrl_metro_volume,
+                    "ppqn": self.state_manager.zynseq.zctrl_ppqn
+                }
+            return processor.controllers_dict
+        return  {
+            "bpm": self.state_manager.zynseq.zctrl_tempo,
+            "metro_enable": self.state_manager.zynseq.zctrl_metro_mode,
+            "metro_volume": self.state_manager.zynseq.zctrl_metro_volume,
+            "ppqn": self.state_manager.zynseq.zctrl_ppqn
+        }
+
+    def send_controller_value(self, zctrl):
+        pass
+
+    # ----------------------------------------------------------------------------
+    # Special
+    # ----------------------------------------------------------------------------
+
+
+# ******************************************************************************

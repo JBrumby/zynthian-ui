@@ -30,9 +30,9 @@ from string import Template
 from os.path import isfile, join
 from subprocess import check_output
 
-from . import zynthian_engine
 from zynconf import ServerPort
 from zyncoder.zyncore import lib_zyncore
+from zyngine.zynthian_engine import zynthian_engine
 
 # ------------------------------------------------------------------------------
 # ZynAddSubFX Engine Class
@@ -55,13 +55,12 @@ class zynthian_engine_zynaddsubfx(zynthian_engine):
         # ['expression', 11, 127],
         ['volume', '/part$i/Pvolume', 96, 127, {'midi_cc': 7}],
         ['panning', '/part$i/Ppanning', 64],
-        ['filter cutoff', 74, 64],
-        ['filter resonance', 71, 64],
+        ['filter cutoff', 74, 64, 127, {'filter': "cutoffFrequency"}],
+        ['filter resonance', 71, 64, 127, {'filter': "resonance"}],
 
         ['voice limit', '/part$i/Pvoicelimit', 0, 60],
         ['drum mode', '/part$i/Pdrummode', 'off', 'off|on'],
-        ['assign mode', '/part$i/polyType', 'poly',
-         [['poly', 'mono', 'legato', 'latch'], [0, 1, 2, 3]]],
+        ['assign mode', '/part$i/polyType', 'poly', [['poly', 'mono', 'legato', 'latch'], [0, 1, 2, 3]]],
 
         # ['portamento on/off', 65, 'off', 'off|on'],
         ['portamento enable', '/part$i/ctl/portamento.portamento', 'off', 'off|on'],
@@ -200,10 +199,14 @@ class zynthian_engine_zynaddsubfx(zynthian_engine):
 
     def set_midi_chan(self, processor):
         if self.osc_server and processor.part_i is not None:
-            lib_zyncore.zmop_set_midi_chan_trans(
-                processor.chain.zmop_index,
-                processor.get_midi_chan(),
-                processor.part_i)
+            midi_chan = processor.get_midi_chan()
+            if 0 <= midi_chan < 16:
+                lib_zyncore.zmop_set_midi_chan_trans(processor.chain.zmop_index,
+                                                    midi_chan,
+                                                    processor.part_i)
+            elif midi_chan == 0xffff:
+                lib_zyncore.zmop_set_midi_chan_all_trans(processor.chain.zmop_index,
+                                                    processor.part_i)
 
     # ----------------------------------------------------------------------------
     # Preset Managament

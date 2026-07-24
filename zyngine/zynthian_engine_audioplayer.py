@@ -4,7 +4,7 @@
 #
 # zynthian_engine implementation for audio player
 #
-# Copyright (C) 2021-2024 Brian Walton <riban@zynthian.org>
+# Copyright (C) 2021-2026 Brian Walton <riban@zynthian.org>
 #
 # ******************************************************************************
 #
@@ -27,12 +27,13 @@ import copy
 import shutil
 import logging
 from glob import glob
+from subprocess import check_output, STDOUT
 
-from . import zynthian_engine
-from zynlibs.zynaudioplayer import *
+import zynconf
+from zyngine.zynthian_engine import zynthian_engine
 from zyngine.zynthian_signal_manager import zynsigman
-from zyngine.zynthian_audio_recorder import zynthian_audio_recorder
-from zyngui import zynthian_gui_config
+
+from zynlibs.zynaudioplayer import *
 
 # ------------------------------------------------------------------------------
 # Audio Player Engine Class
@@ -40,9 +41,6 @@ from zyngui import zynthian_gui_config
 
 
 class zynthian_engine_audioplayer(zynthian_engine):
-
-    # Subsignals are defined inside each module. Here we define audio_recorder subsignals:
-    SS_AUDIO_PLAYER_STATE = 1
 
     # ---------------------------------------------------------------------------
     # Config variables
@@ -57,9 +55,8 @@ class zynthian_engine_audioplayer(zynthian_engine):
 
     preset_fexts = zynaudioplayer.get_supported_codecs()
     root_bank_dirs = [
-        ('User Audio', zynthian_engine.my_data_dir + "/audio"),
+        ('User Audio', zynthian_engine.my_data_dir + "/files/Audio"),
         ('User Samples', zynthian_engine.my_data_dir + "/files/Samples"),
-        #('System Audio', zynthian_engine.data_dir + "/audio"),
         ('System Samples', zynthian_engine.data_dir + "/files/Samples")
     ]
 
@@ -88,15 +85,16 @@ class zynthian_engine_audioplayer(zynthian_engine):
     # ---------------------------------------------------------------------------
 
     def start(self):
-        self.jackname = zynaudioplayer.get_jack_client_name()
-        zynsigman.register_queued(
-            zynsigman.S_AUDIO_RECORDER, zynthian_audio_recorder.SS_AUDIO_RECORDER_STATE, self.update_rec)
+        if zynaudioplayer.init():
+            self.jackname = zynaudioplayer.get_jack_client_name()
+            zynsigman.register_queued(zynsigman.S_AUDIO_RECORDER, zynsigman.SS_AUDIO_RECORDER_STATE, self.update_rec)
+        else:
+            raise Exception("Can't start zynaudioplayer!")
 
     def stop(self):
         try:
             zynaudioplayer.stop()
-            zynsigman.unregister(
-                zynsigman.S_AUDIO_RECORDER, zynthian_audio_recorder.SS_AUDIO_RECORDER_STATE, self.update_rec)
+            zynsigman.unregister(zynsigman.S_AUDIO_RECORDER, zynsigman.SS_AUDIO_RECORDER_STATE, self.update_rec)
         except Exception as e:
             logging.error("Failed to close audio player: %s", e)
 
@@ -148,7 +146,8 @@ class zynthian_engine_audioplayer(zynthian_engine):
 
     def get_bank_list(self, processor=None):
         banks = self.get_dir_file_list(self.preset_fexts, self.root_bank_dirs, recursion=1, exclude_empty=True,
-                                      internal_include_empty=False, dirs_only=False)
+                                      internal_include_empty=False, dirs_only=False,
+                                      info=[["Folder", "folder.png"], ["Audio", "file_audio.png"]])
         return banks
 
         #return self.get_bank_dirlist(recursion=1, internal_include_empty=True)
@@ -201,7 +200,8 @@ class zynthian_engine_audioplayer(zynthian_engine):
                 dpath = processor.preset_subdir_info[0]
             else:
                 dpath = bank[0]
-            presets = self.get_filelist(dpath, self.preset_fexts, include_dirs=True, exclude_empty_dirs=True)
+            presets = self.get_filelist(dpath, self.preset_fexts, include_dirs=True, exclude_empty_dirs=True,
+                                        info=[["Folder", "folder.png"], ["Audio", "file_audio.png"]])
 
             self.presets_add_audio_info(presets)
             return presets
@@ -212,8 +212,8 @@ class zynthian_engine_audioplayer(zynthian_engine):
                 fparts = os.path.splitext(preset[4])
                 duration = zynaudioplayer.get_file_duration(preset[0])
                 fduration = f"{int(duration/60):02d}:{round(duration)%60:02d}"
-                preset[2] += f"{fparts[1]} ({fduration})"
-                #preset.append([f"Format: {fparts[1][1:].upper()}\nLength: {fduration}", "file_audio.png"])
+                #preset[2] += f"{fparts[1]} ({fduration})"
+                preset.append([f"Format: {fparts[1][1:].upper()}\nLength: {fduration}", "file_audio.png"])
 
     def preset_exists(self, bank_info, preset_name):
         if not bank_info or bank_info[0] is None:
@@ -232,6 +232,13 @@ class zynthian_engine_audioplayer(zynthian_engine):
             processor.preset_subdir_info = copy.copy(preset)
             processor.preset_subdir_info[1] = processor.preset_index
             processor.preset_subdir_info[3] = back_subdir_info
+            processor.preset_index = 0
+            processor.preset_name = None
+            processor.preset_info = None
+            return None
+
+        # Check that audio file exists and it's valid...
+        if not os.path.isfile(preset[0]) or zynaudioplayer.get_file_duration(preset[0]) <= 0:
             processor.preset_index = 0
             processor.preset_name = None
             processor.preset_info = None
@@ -285,8 +292,8 @@ class zynthian_engine_audioplayer(zynthian_engine):
         default_b = 0
         track_labels = ['mixdown']
         track_values = [-1]
-        zoom_labels = ['x1']
-        zoom_values = [1]
+        zoom_labels = ['x1', 'x2', 'x4']
+        zoom_values = [1, 2, 4]
         if dur:
             channels = zynaudioplayer.get_channels(processor.handle)
             if channels > 2:
@@ -379,7 +386,6 @@ class zynthian_engine_audioplayer(zynthian_engine):
     def delete_preset(self, bank, preset):
         try:
             os.remove(preset[0])
-            os.remove(f"{preset[0]}.png")
         except Exception as e:
             logging.debug(e)
 
@@ -401,20 +407,17 @@ class zynthian_engine_audioplayer(zynthian_engine):
             logging.debug(e)
 
     def is_preset_user(self, preset):
-        if preset[2] != "capture":
+        if zynthian_engine.my_data_dir in preset[0]:
             return True
         else:
             return False
 
     def load_latest(self, processor):
-
         bank_dirs = [self.root_bank_dirs[0][1] + "/capture"]
-        bank_dirs += zynthian_gui_config.get_external_storage_dirs(zynthian_engine.ex_data_dir)
-
+        bank_dirs += zynconf.get_external_storage_dirs(zynthian_engine.ex_data_dir)
         wav_fpaths = []
         for bank_dir in bank_dirs:
             wav_fpaths += glob(f"{bank_dir}/*.wav")
-
         if len(wav_fpaths) > 0:
             latest_fpath = max(wav_fpaths, key=os.path.getctime)
             bank_fpath = os.path.dirname(latest_fpath)
@@ -428,6 +431,32 @@ class zynthian_engine_audioplayer(zynthian_engine):
                 title = str.replace(parts[0], '_', ' ')
                 processor.set_preset([latest_fpath, None, title, None, bank_fpath])
         self.processor = processor
+
+    # ----------------------------------------------------------------------------
+    # Audioplayer Preset Options
+    # ----------------------------------------------------------------------------
+
+    def get_preset_options(self, preset):
+        options = {}
+        if zynaudioplayer.get_file_channels(preset[0]) >= 4:
+            options["Deconvolve"] = [preset, ["Deconvolve a multi-channel recording to generate IR", "settings.png"]]
+        return options
+
+    def preset_options_cb(self, option, preset):
+        if option == "Deconvolve":
+            self.state_manager.start_busy("deconvolve preset", "deconvolving audio file...")
+            self.deconvolve_preset(preset)
+            self.state_manager.end_busy("deconvolve preset")
+
+    def deconvolve_preset(self, preset):
+        try:
+            dest_fpath = f"{self.my_data_dir}/files/IRs/deconvolved/{os.path.basename(preset[0])}"
+            cmd = [f"{self.ui_dir}/zyngine/deconvolve.py", preset[0], dest_fpath]
+            logging.debug(f"Executing: {cmd}")
+            result = check_output(cmd, encoding="utf-8", stderr=STDOUT)
+            logging.debug(result)
+        except Exception as e:
+            logging.error(e)
 
     # ----------------------------------------------------------------------------
     # Controllers Management
@@ -454,7 +483,7 @@ class zynthian_engine_audioplayer(zynthian_engine):
                             ctrl_dict['transport'].set_value("stopped", False)
                             processor.status = ""
                         zynsigman.send(
-                            zynsigman.S_AUDIO_PLAYER, self.SS_AUDIO_PLAYER_STATE, handle=handle, state=value)
+                            zynsigman.S_AUDIO_PLAYER, zynsigman.SS_AUDIO_PLAYER_STATE, handle=handle, state=value)
                     elif id == 2:
                         ctrl_dict['position'].set_value(value, False)
                     elif id == 3:

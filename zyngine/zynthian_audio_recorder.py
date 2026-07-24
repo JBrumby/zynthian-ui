@@ -5,7 +5,7 @@
 #
 # Zynthian Audio Recorder Class
 #
-# Copyright (C) 2015-2022 Fernando Moyano <jofemodo@zynthian.org>
+# Copyright (C) 2015-2026 Fernando Moyano <jofemodo@zynthian.org>
 #                         Brian Walton <riban@zynthian.org>
 #
 # ******************************************************************************
@@ -30,8 +30,8 @@ from subprocess import Popen
 from datetime import datetime
 
 # Zynthian specific modules
-from zyngui import zynthian_gui_config
 from zyngine.zynthian_signal_manager import zynsigman
+from zyngui import zynthian_gui_config
 
 # ------------------------------------------------------------------------------
 # Zynthian Audio Recorder Class
@@ -40,39 +40,27 @@ from zyngine.zynthian_signal_manager import zynsigman
 
 class zynthian_audio_recorder:
 
-    # Subsignals are defined inside each module. Here we define audio_recorder subsignals:
-    SS_AUDIO_RECORDER_STATE = 1
-    SS_AUDIO_RECORDER_ARM = 2
-
     capture_dir_sdc = os.environ.get('ZYNTHIAN_MY_DATA_DIR', "/zynthian/zynthian-my-data") + "/capture"
     ex_data_dir = os.environ.get('ZYNTHIAN_EX_DATA_DIR', "/media/root")
 
     def __init__(self, state_manager):
         self.rec_proc = None
         self.status = False
-        self.armed = set()  # List of chains armed to record
         self.state_manager = state_manager
         self.filename = None
 
-    def arm(self, channel):
-        self.armed.add(channel)
-        zynsigman.send(zynsigman.S_AUDIO_RECORDER, self.SS_AUDIO_RECORDER_ARM, chan=channel, value=True)
-
-    def unarm(self, channel):
-        try:
-            self.armed.remove(channel)
-            zynsigman.send(zynsigman.S_AUDIO_RECORDER, self.SS_AUDIO_RECORDER_ARM, chan=channel, value=False)
-        except:
-            logging.info("Channel %d not armed", channel)
-
-    def toggle_arm(self, channel):
-        if self.is_armed(channel):
-            self.unarm(channel)
+    def get_new_filename(self):
+        exdirs = zynthian_gui_config.get_external_storage_dirs(self.ex_data_dir)
+        if exdirs:
+            path = exdirs[0]
+            filename = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         else:
-            self.arm(channel)
-
-    def is_armed(self, channel):
-        return channel in self.armed
+            path = self.capture_dir_sdc
+            filename = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+        if self.state_manager.last_snapshot_fpath and len(self.state_manager.last_snapshot_fpath) > 4:
+            filename += "_" + os.path.basename(self.state_manager.last_snapshot_fpath[:-4])
+        filename = filename.replace("/", ";").replace(">", ";").replace(" ; ", ";")
+        return "{}/{}.wav".format(path, filename)
 
     def start_recording(self, processor=None):
         if self.rec_proc:
@@ -80,17 +68,23 @@ class zynthian_audio_recorder:
             return False
 
         cmd = ["/usr/local/bin/jack_capture", "--daemon", "--bitdepth", "16", "--bufsize", "30", "--maxbufsize", "120"]
-        if self.armed:
-            for port in sorted(self.armed):
+        single_chan = True
+        for chain in self.state_manager.chain_manager.chains.values():
+            if chain.zynmixer_proc and chain.zynmixer_proc.controllers_dict["record"].value:
+                single_chan = False
+                if chain.zynmixer_proc.eng_code == "MI":
+                    port = f"zynmixer_chan:output_{chain.zynmixer_proc.mixer_chan:02d}"
+                else:
+                    port = f"zynmixer_bus:output_{chain.zynmixer_proc.mixer_chan:02d}"
                 cmd.append("--port")
-                cmd.append(f"zynmixer:output_{port + 1:02d}a")
+                cmd.append(f"{port}a")
                 cmd.append("--port")
-                cmd.append(f"zynmixer:output_{port + 1:02d}b")
-        else:
+                cmd.append(f"{port}b")
+        if single_chan:
             cmd.append("--port")
-            cmd.append("zynmixer:output_17a")
+            cmd.append("zynmixer_bus:output_00a")
             cmd.append("--port")
-            cmd.append("zynmixer:output_17b")
+            cmd.append("zynmixer_bus:output_00b")
 
         self.filename = self.state_manager.get_new_capture_fpath("wav")
         cmd.append(self.filename)
@@ -106,7 +100,7 @@ class zynthian_audio_recorder:
             return False
 
         self.status = True
-        zynsigman.send(zynsigman.S_AUDIO_RECORDER, self.SS_AUDIO_RECORDER_STATE, state=True)
+        zynsigman.send(zynsigman.S_AUDIO_RECORDER, zynsigman.SS_AUDIO_RECORDER_STATE, state=True)
 
         # Should this be implemented using signals?
         if processor:
@@ -125,9 +119,9 @@ class zynthian_audio_recorder:
                 return False
 
             self.status = False
-            zynsigman.send(zynsigman.S_AUDIO_RECORDER, self.SS_AUDIO_RECORDER_STATE, state=False)
+            zynsigman.send(zynsigman.S_AUDIO_RECORDER, zynsigman.SS_AUDIO_RECORDER_STATE, state=False)
 
-            # Should this be implemented using signals?
+            # Should this be implemented using signals? => YES!!
             if player is None:
                 self.state_manager.audio_player.engine.load_latest(self.state_manager.audio_player)
             else:

@@ -28,9 +28,11 @@ import tkinter
 import logging
 from datetime import datetime
 from time import monotonic
+import tkinter.font as tkfont
 
 # Zynthian specific modules
 from zyngui import zynthian_gui_config
+from zyngui.zynthian_gui_fullscreen_modal import zynthian_gui_fullscreen_modal
 
 # ------------------------------------------------------------------------------
 # Zynthian X-Y Controller GUI Class
@@ -39,45 +41,40 @@ from zyngui import zynthian_gui_config
 # TODO: Derive control_xy from gui base class?
 
 
-class zynthian_gui_control_xy():
+class zynthian_gui_control_xy(zynthian_gui_fullscreen_modal):
 
     def __init__(self):
+        super().__init__()
         self.canvas = None
         self.hline = None
         self.vline = None
-        self.shown = False
         self.zyngui = zynthian_gui_config.zyngui
 
         # Init X vars
         self.padx = 24
-        self.width = zynthian_gui_config.screen_width - 2 * self.padx
+        self.x0 = self.padx
+        self.x1 = zynthian_gui_config.display_width - self.padx
+        self.width = zynthian_gui_config.display_width - 2 * self.padx
         self.x = self.width / 2
         self.xvalue = 64
 
         # Init Y vars
         self.pady = 18
-        self.height = zynthian_gui_config.screen_height - 2 * self.pady
+        self.y0 = self.pady
+        self.y1 = zynthian_gui_config.display_height - self.pady
+        self.height = zynthian_gui_config.display_height - 2 * self.pady
         self.y = self.height / 2
         self.yvalue = 64
 
         self.last_motion_ts = None
 
-        # Main Frame
-        self.main_frame = tkinter.Frame(zynthian_gui_config.top,
-                                        width=zynthian_gui_config.screen_width,
-                                        height=zynthian_gui_config.screen_height,
-                                        bg=zynthian_gui_config.color_panel_bg)
-
         # Create Canvas
-        self.canvas = tkinter.Canvas(self.main_frame,
-                                     width=self.width,
-                                     height=self.height,
+        self.canvas = tkinter.Canvas(self,
                                      # bd=0,
                                      highlightthickness=0,
                                      relief='flat',
                                      bg=zynthian_gui_config.color_bg)
-        self.canvas.grid(padx=(self.padx, self.padx),
-                         pady=(self.pady, self.pady))
+        self.canvas.grid(sticky="news")
 
         # Setup Canvas Callbacks
         self.canvas.bind("<B1-Motion>", self.cb_canvas)
@@ -85,18 +82,51 @@ class zynthian_gui_control_xy():
         self.tap_count = 0
         self.canvas.bind("<Button-1>", self.cb_press)
 
+        # Create text
+        self.text = self.canvas.create_text(
+            zynthian_gui_config.display_width//2,
+            int(0.98 * zynthian_gui_config.display_height),
+            anchor=tkinter.S,
+            justify=tkinter.CENTER,
+            font=zynthian_gui_config.font_topbar,
+            fill=zynthian_gui_config.color_ctrl_bg_off,
+            text="Tap 3 times to exit"
+        )
+
+        self.text_x = self.canvas.create_text(
+            self.x0 + 5,
+            self.y0 + 5,
+            anchor=tkinter.NW,
+            justify=tkinter.LEFT,
+            font=zynthian_gui_config.font_topbar,
+            fill=zynthian_gui_config.color_ctrl_bg_off,
+            text=""
+        )
+        font = tkfont.Font(family=zynthian_gui_config.font_family, size=zynthian_gui_config.topbar_fs)
+        text_height = font.metrics("linespace")
+
+        self.text_y = self.canvas.create_text(
+            self.x0 + 5,
+            self.y0 + 10 + text_height,
+            anchor=tkinter.NW,
+            justify=tkinter.LEFT,
+            font=zynthian_gui_config.font_topbar,
+            fill=zynthian_gui_config.color_ctrl_bg_off,
+            text=""
+        )
+
         # Create Cursor
         self.hline = self.canvas.create_line(
             0,
             self.y,
-            zynthian_gui_config.screen_width,
+            zynthian_gui_config.display_width,
             self.y,
             fill=zynthian_gui_config.color_on)
         self.vline = self.canvas.create_line(
             self.x,
             0,
             self.x,
-            zynthian_gui_config.screen_width,
+            zynthian_gui_config.display_width,
             fill=zynthian_gui_config.color_on)
 
     def build_view(self):
@@ -111,17 +141,9 @@ class zynthian_gui_control_xy():
 
     def show(self):
         if not self.shown:
-            if self.zyngui.test_mode:
-                logging.warning("TEST_MODE: {}".format(self.__class__.__module__))
-            self.shown = True
-            self.main_frame.grid(row=0, column=zynthian_gui_config.main_screen_column)
+            super().show()
             self.get_controller_values()
             self.refresh()
-
-    def hide(self):
-        if self.shown:
-            self.shown = False
-            self.main_frame.grid_forget()
 
     def get_controller_values(self):
         if self.zyngui.state_manager.zctrl_x.value != self.xvalue:
@@ -134,7 +156,7 @@ class zynthian_gui_control_xy():
             else:
                 self.x = int(self.width * (self.xvalue - self.zyngui.state_manager.zctrl_x.value_min) /
                              self.zyngui.state_manager.zctrl_x.value_range)
-            self.canvas.coords(self.vline, self.x, 0, self.x, self.height)
+            self.canvas.coords(self.vline, self.x, self.y0, self.x, self.y1)
 
         if self.zyngui.state_manager.zctrl_y.value != self.yvalue:
             self.yvalue = self.zyngui.state_manager.zctrl_y.value
@@ -146,17 +168,17 @@ class zynthian_gui_control_xy():
             else:
                 self.y = int(self.height * (self.yvalue - self.zyngui.state_manager.zctrl_y.value_min) /
                              self.zyngui.state_manager.zctrl_y.value_range)
-            self.canvas.coords(self.hline, 0, self.y, self.width, self.y)
+            self.canvas.coords(self.hline, self.x0, self.y, self.x1, self.y)
 
     def refresh(self):
-        self.canvas.coords(self.hline, 0, self.y, self.width, self.y)
-        self.canvas.coords(self.vline, self.x, 0, self.x, self.height)
+        self.canvas.coords(self.hline, self.x0, self.y, self.x1, self.y)
+        self.canvas.coords(self.vline, self.x, self.y0, self.x, self.y1)
 
         if self.zyngui.state_manager.zctrl_x.is_logarithmic:
-            xv = (math.pow(10, self.x / self.width) * self.zyngui.state_manager.zctrl_x.value_range + (10 *
+            xv = (math.pow(10, (self.x - self.x0) / self.width) * self.zyngui.state_manager.zctrl_x.value_range + (10 *
                   self.zyngui.state_manager.zctrl_x.value_min - self.zyngui.state_manager.zctrl_x.value_max)) / 9
         else:
-            xv = self.zyngui.state_manager.zctrl_x.value_min + self.x * \
+            xv = self.zyngui.state_manager.zctrl_x.value_min + (self.x - self.x0) * \
                 self.zyngui.state_manager.zctrl_x.value_range / self.width
 
         if self.zyngui.state_manager.zctrl_x.is_integer:
@@ -165,12 +187,13 @@ class zynthian_gui_control_xy():
         if xv != self.xvalue:
             self.xvalue = xv
             self.zyngui.state_manager.zctrl_x.set_value(self.xvalue, True)
+            self.canvas.itemconfig(self.text_x, text=f"{self.zyngui.state_manager.zctrl_x.name}: {self.xvalue:.3f}")
 
         if self.zyngui.state_manager.zctrl_y.is_logarithmic:
-            yv = (math.pow(10, self.y / self.height) * self.zyngui.state_manager.zctrl_y.value_range + (10 *
+            yv = (math.pow(10, (self.y - self.y0) / self.height) * self.zyngui.state_manager.zctrl_y.value_range + (10 *
                   self.zyngui.state_manager.zctrl_y.value_min - self.zyngui.state_manager.zctrl_y.value_max)) / 9
         else:
-            yv = self.zyngui.state_manager.zctrl_y.value_min + self.y * \
+            yv = self.zyngui.state_manager.zctrl_y.value_min + (self.y - self.y0) * \
                 self.zyngui.state_manager.zctrl_y.value_range / self.height
 
         if self.zyngui.state_manager.zctrl_y.is_integer:
@@ -179,11 +202,12 @@ class zynthian_gui_control_xy():
         if yv != self.yvalue:
             self.yvalue = yv
             self.zyngui.state_manager.zctrl_y.set_value(self.yvalue, True)
+            self.canvas.itemconfig(self.text_y, text=f"{self.zyngui.state_manager.zctrl_y.name}: {self.yvalue:.3f}")
 
     def cb_canvas(self, event):
         # logging.debug("XY controller => %s, %s" % (event.x, event.y))
-        self.x = event.x
-        self.y = event.y
+        self.x = min(self.x1, max(self.x0, event.x))
+        self.y = min(self.y1, max(self.y0, event.y))
         self.refresh()
         self.last_motion_ts = datetime.now()
 
@@ -212,7 +236,7 @@ class zynthian_gui_control_xy():
                 self.zyngui.zynpot_pr_state[i] += 1
                 fine = True
             else:
-                fine = self.zyngui.alt_mode
+                fine = self.alt_mode
             res = zctrl.nudge(dval, fine=fine)
             if res:
                 self.get_controller_values()
@@ -224,6 +248,10 @@ class zynthian_gui_control_xy():
 
     def switch_select(self, t='S'):
         pass
+
+    def get_alt_mode(self):
+        return self.alt_mode
+
 
 
 # ------------------------------------------------------------------------------

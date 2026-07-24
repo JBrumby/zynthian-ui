@@ -42,7 +42,7 @@ class zynthian_gui_preset(zynthian_gui_selector_info, zynthian_gui_save_preset):
         self.preload_timer_id = None
         self.preload_timer_ms = 300
         self.processor = None
-        super().__init__('Preset', default_icon="preset.png")
+        zynthian_gui_selector_info.__init__(self, 'Preset', default_icon="preset.png", zsel_hidden=False)
 
     def fill_list(self):
         if not self.processor:
@@ -98,15 +98,15 @@ class zynthian_gui_preset(zynthian_gui_selector_info, zynthian_gui_save_preset):
     def select_action(self, i, t='S'):
         if t == 'S':
             # Allow animation
-            self.icon_canvas.grid_remove()
-            self.loading_canvas.grid(rowspan=1)
+            self.info_canvas.grid_remove()
+            self.grid_loading_canvas()
             self.zyngui.state_manager.start_busy("set preset")
             # Set preset
             result = self.zyngui.get_current_processor().set_preset(i)
             self.zyngui.state_manager.end_busy("set preset")
             # Stop animation and restore icon canvas
             self.loading_canvas.grid_remove()
-            self.icon_canvas.grid()
+            self.grid_info_canvas()
             # If result is None (still browsing) => refresh preset list
             if result is None:
                 self.set_select_path()
@@ -114,7 +114,12 @@ class zynthian_gui_preset(zynthian_gui_selector_info, zynthian_gui_save_preset):
             # If success or already loaded => open control screen
             else:
                 self.zyngui.purge_screen_history("bank")
-                self.zyngui.replace_screen("control")
+                if self.processor.id > -2:
+                    self.zyngui.replace_screen("chain_control")
+                else:
+                    self.zyngui.replace_screen("control")
+        elif t == 'B':
+            self.show_preset_options()
 
     def show_preset_options(self):
         options = {}
@@ -122,13 +127,12 @@ class zynthian_gui_preset(zynthian_gui_selector_info, zynthian_gui_save_preset):
         try:
             preset = copy.deepcopy(self.list_data[self.index])
             if preset[2][0] == "❤":
-                preset[2] = preset[2][1:]
+                preset[2] = preset[2][2:]
             preset_name = preset[2]
             title = f"Preset: {preset_name}"
         except:
             preset = None
             title = "Preset Options"
-            pass
         if preset:
             if self.processor.engine.is_preset_fav(preset):
                 options["\u2612 Favourite"] = [preset, ["Remove from favorites list", "favorite_remove.png"]]
@@ -139,6 +143,7 @@ class zynthian_gui_preset(zynthian_gui_selector_info, zynthian_gui_save_preset):
                     options["Rename"] = [preset, ["Rename preset", "rename.png"]]
                 if hasattr(engine, "delete_preset"):
                     options["Delete"] = [preset, ["Delete preset", "file_delete.png"]]
+
         global_options = {}
         if hasattr(engine, "save_preset"):
             global_options["Save new preset"] = [True, ["Save as new preset", "file_save.png"]]
@@ -147,8 +152,21 @@ class zynthian_gui_preset(zynthian_gui_selector_info, zynthian_gui_save_preset):
         if global_options:
             options["Global"] = None
             options.update(global_options)
-        self.zyngui.screens['option'].config(title, options, self.preset_options_cb)
-        self.zyngui.show_screen('option')
+
+        # Processor (engine) specific preset options
+        if hasattr(engine, "get_preset_options") and callable(engine.get_preset_options):
+            proc_options = engine.get_preset_options(preset)
+        else:
+            proc_options = {}
+        if proc_options:
+            options["Processor"] = None
+            options.update(proc_options)
+
+        if options:
+            self.zyngui.screens['option'].config(title, options, self.preset_options_cb)
+            self.zyngui.show_screen('option')
+        else:
+            self.zyngui.close_screen()
 
     def show_menu(self):
         self.show_preset_options()
@@ -156,7 +174,7 @@ class zynthian_gui_preset(zynthian_gui_selector_info, zynthian_gui_save_preset):
     def toggle_menu(self):
         if self.shown:
             self.show_menu()
-        elif self.zyngui.current_screen == "option":
+        elif self.zyngui.get_current_screen() == "option":
             self.close_screen()
 
     def preset_options_cb(self, option, preset):
@@ -172,6 +190,9 @@ class zynthian_gui_preset(zynthian_gui_selector_info, zynthian_gui_save_preset):
             super().save_preset()
         elif option == "Scan for new presets":
             self.scan_presets()
+        # Process engine specific preset options
+        elif hasattr(self.processor.engine, "preset_options_cb") and callable(self.processor.engine.preset_options_cb):
+            self.processor.engine.preset_options_cb(option, preset)
 
     def rename_preset(self, new_name):
         preset = self.list_data[self.index]
@@ -220,10 +241,7 @@ class zynthian_gui_preset(zynthian_gui_selector_info, zynthian_gui_save_preset):
             if t == 'S':
                 self.zyngui.toggle_favorites()
                 return True
-        elif swi == 3:
-            if t == 'B':
-                self.show_preset_options()
-                return True
+
         return False
 
     def cuia_toggle_play(self, params=None):
@@ -232,9 +250,6 @@ class zynthian_gui_preset(zynthian_gui_selector_info, zynthian_gui_save_preset):
                 self.click_listbox()
         except:
             pass
-
-    def set_selector(self, zs_hidden=False):
-        super().set_selector(zs_hidden)
 
     def select_listbox(self, index, see=True):
         super().select_listbox(index, see=True)
@@ -248,7 +263,7 @@ class zynthian_gui_preset(zynthian_gui_selector_info, zynthian_gui_save_preset):
     def preload_action(self):
         self.preload_timer_id = None
         if self.list_data and self.index < len(self.list_data):
-            self.zyngui.state_manager.start_busy("preload preset")
+            self.zyngui.state_manager.start_busy("preload preset", tts=False)
             self.processor.preload_preset(self.index)
             self.zyngui.state_manager.end_busy("preload preset")
 

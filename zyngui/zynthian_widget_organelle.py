@@ -20,9 +20,9 @@
 # ******************************************************************************
 
 import math
-import liblo
 import logging
 import tkinter as tk
+import pyliblo3 as liblo
 
 # Zynthian specific modules
 from zyngine import zynthian_controller
@@ -356,18 +356,26 @@ class zynthian_widget_organelle(zynthian_widget_base):
             self.show_touch_widgets = False
             self.switch_i_selmode = 19
             self.switch_i_aux = 23
+            self.wsled_i_selmode = 12
+            self.wsled_i_aux = 13
         elif zynthian_gui_config.check_wiring_layout(["Z2"]):
             self.show_touch_widgets = False
-            self.switch_i_selmode = 9
-            self.switch_i_aux = 10
-        elif zynthian_gui_config.check_kit_version(["V4"]):
+            self.switch_i_selmode = 15
+            self.switch_i_aux = 16
+            self.wsled_i_selmode = 13
+            self.wsled_i_aux = 14
+        elif zynthian_gui_config.check_wiring_layout(["MCP23017_ZYN"]):
             self.show_touch_widgets = False
             self.switch_i_selmode = 5
             self.switch_i_aux = 4
+            self.wsled_i_selmode = None
+            self.wsled_i_aux = None
         else:
             self.show_touch_widgets = True
             self.switch_i_selmode = None
             self.switch_i_aux = None
+            self.wsled_i_selmode = None
+            self.wsled_i_aux = None
 
         #self.show_touch_widgets = True
         if layout['columns'] == 2:
@@ -417,7 +425,7 @@ class zynthian_widget_organelle(zynthian_widget_base):
 
         # LED indicator and control buttons.
         if self.show_touch_widgets:
-            if zynthian_gui_config.enable_touch_navigation:
+            if zynthian_gui_config.touch_navigation:
                 self.volume_slider = None
             else:
                 self.volume_slider = VolumeSlider(self.controls_frame, zyngui_control=self.zyngui_control, width=self.width, height=6*self.hunit)
@@ -1005,16 +1013,15 @@ class zynthian_widget_organelle(zynthian_widget_base):
             return True
 
     def update_wsleds(self, leds):
-        # F3 & F4
         wsl = self.zyngui.wsleds
         if self.selector:
             if self.select_mode:
-                #wsl.set_led(leds[12], wsl.wscolor_active2)
-                wsl.blink(leds[12], wsl.wscolor_active2)
+                #wsl.set_led(leds[self.wsled_i_selmode], wsl.wscolor_active2)
+                wsl.blink(leds[self.wsled_i_selmode], wsl.wscolor_active2)
             else:
-                wsl.set_led(leds[12], wsl.wscolor_active2)
+                wsl.set_led(leds[self.wsled_i_selmode], wsl.wscolor_active2)
         if self.aux_pushed:
-            wsl.set_led(leds[13], wsl.wscolor_green)
+            wsl.set_led(leds[self.wsled_i_aux], wsl.wscolor_green)
         else:
-            wsl.set_led(leds[13], wsl.wscolor_active2)
+            wsl.set_led(leds[self.wsled_i_aux], wsl.wscolor_active2)
 

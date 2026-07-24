@@ -67,8 +67,7 @@ ZynSensorActionType = [
 ]
 
 NoteCuiaDefault = {
-    "0": "POWER_OFF",
-    "2": "REBOOT",
+    "0": "POWER",
     "4": "RESTART_UI",
     "5": "RELOAD_MIDI_CONFIG",
     "7": "RELOAD_KEY_BINDING",
@@ -94,13 +93,13 @@ NoteCuiaDefault = {
     "53": "ARROW_LEFT",
     "55": "BACK",
     "57": "SELECT",
-    "60": "SCREEN_MAIN_MENU",
+    "60": "SCREEN_CHAIN_MANAGER",
     "62": "SCREEN_ADMIN",
-    "64": "SCREEN_AUDIO_MIXER",
+    "64": "SCREEN_MIXER",
     "65": "SCREEN_SNAPSHOT",
     "67": "SCREEN_ALSA_MIXER",
     "69": "SCREEN_MIDI_RECORDER",
-    "71": "SCREEN_ZYNPAD",
+    "71": "SCREEN_LAUNCHER",
     "72": "SCREEN_PATTERN_EDITOR",
     "74": "SCREEN_BANK",
     "76": "SCREEN_PRESET",
@@ -246,7 +245,7 @@ def save_config(config, updsys=False, fpath=None):
         if res:
             varname = res.group(1)
             if varname in config:
-                value = config[varname].replace("\n", "\\n")
+                value = str(config[varname]).replace("\n", "\\n")
                 value = value.replace("\r", "")
                 os.environ[varname] = value
                 lines[i] = "export %s=\"%s\"\n" % (varname, value)
@@ -262,7 +261,7 @@ def save_config(config, updsys=False, fpath=None):
     # Add the rest
     vars_to_add = set(config.keys())-set(updated)
     for varname in vars_to_add:
-        value = config[varname].replace("\n", "\\n")
+        value = str(config[varname]).replace("\n", "\\n")
         value = value.replace("\r", "")
         os.environ[varname] = value
         lines.insert(add_row, "export %s=\"%s\"\n" % (varname, value))
@@ -389,7 +388,8 @@ def get_wifi_list():
                 enabled = False
                 bullet = "\u2610"
             title = f"{bullet} {bars} {ssid} ({rate})"
-            wifi_data.append((ssid, 0, title, configured, enabled))
+            txt = "Disconnect from" if enabled else "Connect to"
+            wifi_data.append((ssid, 0, title, configured, enabled, [f"{txt} Wi-Fi access point.", None]))
 
     # Add Access Point
     if ap_enabled:
@@ -397,7 +397,7 @@ def get_wifi_list():
     else:
         bullet = "\u2610"
     title = f"{bullet} ACCESS POINT zynthian"
-    wifi_data.append(("zynthian-ap", 0, title, True, ap_enabled))
+    wifi_data.append(("zynthian-ap", 0, title, True, ap_enabled, ["Enable zynthian Wi-Fi access point.", None]))
 
     return wifi_data
 

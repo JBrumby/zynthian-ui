@@ -26,7 +26,7 @@
 
 import ctypes
 import logging
-from _ctypes import dlclose
+#from _ctypes import dlclose
 from os.path import dirname, realpath
 
 # -------------------------------------------------------------------------------
@@ -45,8 +45,7 @@ control_cb = None
 
 try:
     # Load or increment ref to lib
-    libaudioplayer = ctypes.cdll.LoadLibrary(
-        dirname(realpath(__file__))+"/build/libzynaudioplayer.so")
+    libaudioplayer = ctypes.cdll.LoadLibrary(dirname(realpath(__file__))+"/build/libzynaudioplayer.so")
     libaudioplayer.get_codec.restype = ctypes.c_char_p
     libaudioplayer.get_base_note.restype = ctypes.c_uint8
     libaudioplayer.get_duration.restype = ctypes.c_float
@@ -55,13 +54,11 @@ try:
     libaudioplayer.get_loop_end_time.restype = ctypes.c_float
     libaudioplayer.get_crop_start_time.restype = ctypes.c_float
     libaudioplayer.get_crop_end_time.restype = ctypes.c_float
-    libaudioplayer.get_file_duration.restype = ctypes.c_float
     libaudioplayer.get_env_attack.restype = ctypes.c_float
     libaudioplayer.get_env_hold.restype = ctypes.c_float
     libaudioplayer.get_env_decay.restype = ctypes.c_float
     libaudioplayer.get_env_sustain.restype = ctypes.c_float
     libaudioplayer.get_env_release.restype = ctypes.c_float
-    libaudioplayer.get_file_info.restype = ctypes.c_char_p
     libaudioplayer.get_filename.restype = ctypes.c_char_p
     libaudioplayer.get_supported_codecs.restype = ctypes.c_char_p
     libaudioplayer.get_jack_client_name.restype = ctypes.c_char_p
@@ -80,10 +77,20 @@ try:
     libaudioplayer.get_pitch.restype = ctypes.c_float
     libaudioplayer.get_varispeed.restype = ctypes.c_float
     libaudioplayer.is_loop.restype = ctypes.c_uint8
+    libaudioplayer.get_file_duration.restype = ctypes.c_float
+    libaudioplayer.get_file_channels.restype = ctypes.c_int32
+    libaudioplayer.get_file_info.restype = ctypes.c_char_p
 
 except Exception as e:
     libaudioplayer = None
     logging.error(f"Can't initialise zynaudioplayer library: {e}")
+
+
+def init():
+    if not libaudioplayer.init_jack():
+        logging.error("libzynaudioplayer failed to initialise jack client\n");
+        return False
+    return True
 
 
 def stop():
@@ -119,8 +126,7 @@ def remove_player(handle):
 # handle: Index of player
 # base_note: MIDI note to playback at normal speed
 def set_base_note(handle, base_note):
-    libaudioplayer.set_base_note(
-        ctypes.c_void_p(handle), ctypes.c_uint8(base_note))
+    libaudioplayer.set_base_note(ctypes.c_void_p(handle), ctypes.c_uint8(base_note))
 
 
 # Get a player's MIDI base note;
@@ -135,11 +141,9 @@ def get_base_note(handle):
 # midi_chan: MIDI channel (0..15 or other value to disable MIDI)
 def set_midi_chan(handle, midi_chan):
     if isinstance(midi_chan, int) and 0 <= midi_chan < 16:
-        libaudioplayer.set_midi_chan(
-            ctypes.c_void_p(handle), ctypes.c_uint8(midi_chan))
+        libaudioplayer.set_midi_chan(ctypes.c_void_p(handle), ctypes.c_uint8(midi_chan))
     else:
-        libaudioplayer.set_midi_chan(
-            ctypes.c_void_p(handle), ctypes.c_uint8(-1))
+        libaudioplayer.set_midi_chan(ctypes.c_void_p(handle), ctypes.c_uint8(-1))
 
 
 # Get a player's index;
@@ -235,8 +239,7 @@ def get_loop_start(handle):
 # handle: Index of player
 # time: Loop start
 def set_loop_start(handle, time):
-    libaudioplayer.set_loop_start_time(
-        ctypes.c_void_p(handle), ctypes.c_float(time))
+    libaudioplayer.set_loop_start_time(ctypes.c_void_p(handle), ctypes.c_float(time))
 
 
 # Get end of loop in seconds from end of file
@@ -265,8 +268,7 @@ def get_crop_start(handle):
 # handle: Index of player
 # time: Crop start
 def set_crop_start(handle, time):
-    libaudioplayer.set_crop_start_time(
-        ctypes.c_void_p(handle), ctypes.c_float(time))
+    libaudioplayer.set_crop_start_time(ctypes.c_void_p(handle), ctypes.c_float(time))
 
 
 # Get end of audio (crop) in seconds from end of file
@@ -280,8 +282,7 @@ def get_crop_end(handle):
 # handle: Index of player
 # time: Crop end
 def set_crop_end(handle, time):
-    libaudioplayer.set_crop_end_time(
-        ctypes.c_void_p(handle), ctypes.c_floattime)
+    libaudioplayer.set_crop_end_time(ctypes.c_void_p(handle), ctypes.c_floattime)
 
 
 # Add a cue point marker
@@ -512,8 +513,7 @@ def get_pitch(handle):
 # handle: Index of player
 # ratio: Ratio of playback speed : pitch shift
 def set_varispeed(handle, ratio):
-    libaudioplayer.set_varispeed(
-        ctypes.c_void_p(handle), ctypes.c_float(ratio))
+    libaudioplayer.set_varispeed(ctypes.c_void_p(handle), ctypes.c_float(ratio))
 
 
 # Get varispeed ratio
@@ -527,8 +527,7 @@ def get_varispeed(handle):
 # handle: Index of player
 # attack: Attack time in seconds
 def set_attack(handle, attack):
-    libaudioplayer.set_env_attack(
-        ctypes.c_void_p(handle), ctypes.c_float(attack))
+    libaudioplayer.set_env_attack(ctypes.c_void_p(handle), ctypes.c_float(attack))
 
 
 # Get envelope attack
@@ -556,8 +555,7 @@ def get_hold(handle):
 # handle: Index of player
 # decay: Decay time in seconds
 def set_decay(handle, decay):
-    libaudioplayer.set_env_decay(
-        ctypes.c_void_p(handle), ctypes.c_float(decay))
+    libaudioplayer.set_env_decay(ctypes.c_void_p(handle), ctypes.c_float(decay))
 
 
 # Get envelope decay
@@ -571,8 +569,7 @@ def get_decay(handle):
 # handle: Index of player
 # sustain: Sustain time in seconds
 def set_sustain(handle, sustain):
-    libaudioplayer.set_env_sustain(
-        ctypes.c_void_p(handle), ctypes.c_float(sustain))
+    libaudioplayer.set_env_sustain(ctypes.c_void_p(handle), ctypes.c_float(sustain))
 
 
 # Get envelope sustain
@@ -586,8 +583,7 @@ def get_sustain(handle):
 # handle: Index of player
 # release: Release time in seconds
 def set_release(handle, release):
-    libaudioplayer.set_env_release(
-        ctypes.c_void_p(handle), ctypes.c_float(release))
+    libaudioplayer.set_env_release(ctypes.c_void_p(handle), ctypes.c_float(release))
 
 
 # Get envelope release
@@ -650,8 +646,7 @@ def get_buffer_count(handle):
 # handle: Index of player
 # time: Time difference in seconds
 def set_pos_notify_delta(handle, time):
-    libaudioplayer.set_pos_notify_delta(
-        ctypes.c_void_p(handle), ctypes.c_float(time))
+    libaudioplayer.set_pos_notify_delta(ctypes.c_void_p(handle), ctypes.c_float(time))
 
 
 # Enable debug output
@@ -671,6 +666,13 @@ def is_debug():
 # Returns: Duration in seconds or zero if file cannot be opened or invalid format
 def get_file_duration(filename):
     return libaudioplayer.get_file_duration(bytes(filename, "utf-8"))
+
+
+# Get num of channels of an audio file
+# filename: Full path and filename
+# Returns: Num of channels or zero if file cannot be opened or invalid format
+def get_file_channels(filename):
+    return libaudioplayer.get_file_channels(bytes(filename, "utf-8"))
 
 
 # Get info from file metadata
